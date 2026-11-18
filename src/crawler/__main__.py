@@ -1,0 +1,94 @@
+"""crawler serve                — 새벽 03:30 · 점심 12:30 (KST) 일정으로 계속 실행 (컨테이너 기본 명령)
+crawler run dawn|lunch [--dry-run]  — 한 번만 실행. --dry-run 은 Studio 로 보내지 않고 크롤러 DB 에만 남김
+"""
+import argparse
+import logging
+
+from . import config, runner
+from . import db as dbm
+from .http import Http, redact
+from .llm import Llm
+from .pipeline import Pipeline
+from .sources.websearch import WebSearch
+from .studio import Studio
+from .webtools import PageReader, Tavily
+
+log = logging.getLogger("crawler")
+
+
+def build(settings, dry_run: bool):
+    sessions = dbm.connect(settings.database_url)
+    http = Http(sessions, settings.user_agent)
+    llm = Llm(settings.gemini_api_key, settings.model) if settings.gemini_api_key else None
+    if llm is None:
+        log.warning("gemini-api-key 없음 — 장르 · 공연 정리 · 웹 검색(신보 · 피지컬 · 굿즈)은 건너뜁니다")
+    searcher = None
+    if llm is not None and settings.tavily_api_key:
+        searcher = WebSearch(llm, Tavily(settings.tavily_api_key), PageReader(http, settings.user_agent))
+    elif llm is not None:
+        log.warning("tavily-api-key 없음 — 웹 검색(신보 · 피지컬 · 굿즈 · 예매 오픈)은 건너뜁니다")
+    studio = None if dry_run else Studio(settings.studio_url, settings.crawler_secret)
+    pipeline = Pipeline(sessions, http, settings, llm=llm, studio=studio, searcher=searcher)
+    return sessions, pipeline
+
+
+def once(kind: str, dry_run: bool = False):
+    settings = config.load()
+    sessions, pipeline = build(settings, dry_run)
+    try:
+        return runner.run(kind, sessions, pipeline, runner.read_seeds(settings.seed_file))
+    finally:
+        if pipeline.searcher is not None:
+            pipeline.searcher.close()           # Scrapling MCP 서버(자식 프로세스) 끄기
+
+
+def serve():
+    from apscheduler.schedulers.blocking import BlockingScheduler
+    from apscheduler.triggers.cron import CronTrigger
+
+    sched = BlockingScheduler(timezone="Asia/Seoul")
+    # 정각에 몰리지 않게 몇 분씩 흩음 (MusicBrainz 이용 정책) · 한 번에 하나만 · 놓친 실행은 1시간 안이면 바로
+    common = {"max_instances": 1, "coalesce": True, "misfire_grace_time": 3600}
+    sched.add_job(lambda: _safe("dawn"), CronTrigger(hour=3, minute=30, jitter=1200, timezone="Asia/Seoul"), id="dawn", **common)
+    sched.add_job(lambda: _safe("lunch"), CronTrigger(hour=12, minute=30, jitter=600, timezone="Asia/Seoul"), id="lunch", **common)
+    log.info("crawler_scheduler_started jobs=dawn 03:30 · lunch 12:30 KST")
+    sched.start()
+
+
+def _safe(kind):
+    try:
+        once(kind)
+    except Exception:  # 설정 · DB 문제 — 기록하고 다음 일정에 다시
+        log.exception("crawl_%s_crashed", kind)
+
+
+class _Redact(logging.Filter):
+    """어느 라이브러리가 찍든 주소 안의 키(KOPIS service= 등)를 가림 — Scrapling 은 요청 주소를 그대로 찍음"""
+
+    def filter(self, record):
+        record.msg, record.args = redact(record.getMessage()), None
+        return True
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_Redact())
+    scrapling_log = logging.getLogger("scrapling")             # Scrapling 은 자기 출력 창구를 따로 붙임 → 로거에도 필터
+    scrapling_log.addFilter(_Redact())
+    scrapling_log.setLevel(logging.WARNING)                    # 요청마다 찍는 줄은 끔
+    p = argparse.ArgumentParser(prog="crawler")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("serve")
+    r = sub.add_parser("run")
+    r.add_argument("kind", choices=["dawn", "lunch"])
+    r.add_argument("--dry-run", action="store_true")
+    args = p.parse_args()
+    if args.cmd == "serve":
+        serve()
+    else:
+        print(once(args.kind, args.dry_run))
+
+
+if __name__ == "__main__":
+    main()
