@@ -1,10 +1,12 @@
 """crawler serve                — 새벽 03:30 · 점심 12:30 (KST) 일정으로 계속 실행 (컨테이너 기본 명령)
 crawler run dawn|lunch [--dry-run]  — 한 번만 실행. --dry-run 은 Studio 로 보내지 않고 크롤러 DB 에만 남김
+실행이 끝나거나 멈추면 Slack 으로 알립니다 (notify.py · dry-run 은 알리지 않음).
 """
 import argparse
 import logging
+import time
 
-from . import config, runner
+from . import config, notify, runner
 from . import db as dbm
 from .http import Http, redact
 from .llm import Llm
@@ -35,11 +37,15 @@ def build(settings, dry_run: bool):
 def once(kind: str, dry_run: bool = False):
     settings = config.load()
     sessions, pipeline = build(settings, dry_run)
+    started = time.monotonic()
     try:
-        return runner.run(kind, sessions, pipeline, runner.read_seeds(settings.seed_file))
+        result = runner.run(kind, sessions, pipeline, runner.read_seeds(settings.seed_file))
     finally:
         if pipeline.searcher is not None:
             pipeline.searcher.close()           # Scrapling MCP 서버(자식 프로세스) 끄기
+    if not dry_run:                             # 실행이 끝나면 Slack 으로 (dry-run 은 알리지 않음)
+        notify.send(settings.slack_webhook_url, notify.message(kind, result, (time.monotonic() - started) / 60))
+    return result
 
 
 def serve():
@@ -58,8 +64,10 @@ def serve():
 def _safe(kind):
     try:
         once(kind)
-    except Exception:  # 설정 · DB 문제 — 기록하고 다음 일정에 다시
+    except Exception as e:  # 설정 · DB 문제 — 기록하고 다음 일정에 다시
         log.exception("crawl_%s_crashed", kind)
+        notify.send(config.load().slack_webhook_url,
+                    f"크롤러 {notify.KINDS.get(kind, kind)} 실행 중단 — {redact(f'{type(e).__name__}: {e}')[:500]}")
 
 
 class _Redact(logging.Filter):

@@ -11,6 +11,6 @@ COPY src ./src
 RUN pip install .
 COPY seeds ./seeds
 USER app
-# 시크릿 파일: /run/secrets/crawler/{crawler.shared-secret, db-password, gemini-api-key, tavily-api-key, kopis-service-key, discogs-token}
+# 시크릿 파일: /run/secrets/crawler/{crawler.shared-secret, db-password, gemini-api-key, tavily-api-key, kopis-service-key, discogs-token, slack-webhook-url}
 # 웹 조사의 페이지 열기는 scrapling-mcp(stdio · 이 컨테이너 안 자식 프로세스 · 포트 없음)의 HTTP 요청만 씁니다 — 브라우저 없음
 CMD ["crawler", "serve"]
