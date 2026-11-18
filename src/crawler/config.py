@@ -22,6 +22,7 @@ class Settings:
     seed_file: Path
     user_agent: str
     concert_days: int               # 오늘부터 며칠 뒤 공연까지 볼지
+    slack_webhook_url: str | None = None   # 실행이 끝나면 알림 (notify.py) · 없으면 보내지 않음
 
 
 def load() -> Settings:
@@ -39,4 +40,5 @@ def load() -> Settings:
         # MusicBrainz 는 앱 이름 · 연락처가 든 User-Agent 를 요구합니다 (개인 메일 대신 서비스 주소)
         user_agent=os.environ.get("CRAWLER_USER_AGENT", "indig-crawler/0.1 ( https://indig.co.kr )"),
         concert_days=int(os.environ.get("CONCERT_DAYS", "90")),
+        slack_webhook_url=_secret("slack-webhook-url"),
     )
