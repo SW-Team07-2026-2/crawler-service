@@ -51,7 +51,8 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
         row.output_tokens = llm.output_tokens if llm else 0
         s.commit()
     log.info("crawl_run_done kind=%s run=%s status=%s stats=%s", kind, run_id, status, row.stats_json)
-    return {"run": run_id, "status": status, "stats": dict(pipeline.stats)}
+    return {"run": run_id, "status": status, "stats": dict(pipeline.stats), "error": error,
+            "input_tokens": row.input_tokens, "output_tokens": row.output_tokens}
 
 
 def _new_names(sessions, names: list[str]) -> list[str]:
