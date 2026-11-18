@@ -1,0 +1,16 @@
+"""Catalog · Concert 의 정해진 값 (catalog-service · concert-service develop 기준 11/17). 목록 밖 값을 보내면 Catalog 가 항목을 거절합니다."""
+
+GENRES = [
+    "INDIE_ROCK", "ALTERNATIVE", "GARAGE", "PUNK", "HARDCORE", "EMO", "METAL", "POST_ROCK", "SHOEGAZE", "PSYCHEDELIC",
+    "INDIE_POP", "DREAM_POP", "SYNTH_POP", "CITY_POP",
+    "FOLK", "ELECTRONIC", "RNB_SOUL", "HIPHOP", "JAZZ", "BLUES", "FUNK", "SKA_REGGAE", "ETC",
+]
+ALBUM_TYPES = ["ALBUM", "EP", "SINGLE"]
+PHYSICAL_FORMATS = ["LP", "CD", "CASSETTE"]
+REGIONS = [
+    "SEOUL", "BUSAN", "DAEGU", "INCHEON", "GWANGJU", "DAEJEON", "ULSAN", "SEJONG",
+    "GYEONGGI", "GANGWON", "CHUNGBUK", "CHUNGNAM", "JEONBUK", "JEONNAM", "GYEONGBUK", "GYEONGNAM", "JEJU",
+]
+CONCERT_TYPES = ["SOLO", "FESTIVAL"]
+GOODS_CATEGORIES = ["TSHIRT", "OUTER", "KEYRING", "PICK", "MUFFLER", "SCARF", "BAG", "HAT", "ETC"]
+OPTION_SIZES = ["XS", "S", "M", "L", "XL", "XXL", "FREE"]
