@@ -625,3 +625,38 @@ def test_kopis_down_stops_the_concert_loop_after_five_misses_in_a_row(sessions):
     assert out["stats"]["concert_fetch_error"] == 5 and out["stats"]["concert_kopis_down"] == 1
     assert not any("pblprfr/PF600" in u or "pblprfr/PF700" in u for u in w.calls)
     assert out["status"] == "DONE" and [path for path, _ in studio.posts] == [ARTISTS, ALBUMS]
+
+
+def test_discogs_error_skips_only_the_physical_not_the_artist(sessions):
+    """11/19 안치환: MusicBrainz 가 가리키는 Discogs 아티스트가 지워져 404 → 아티스트 전체가 빠졌음"""
+    w = web()
+    w.add("artist/bs?", {"id": "bs", "name": "검정치마", "aliases": [],
+                         "relations": [{"type": "discogs", "url": {"resource": "https://www.discogs.com/artist/9"}}]})
+    w.add("api.discogs.com/artists/9", {"message": "Artist not found."}, status=404)
+    llm = FakeLlm(genres={"검정치마": ["INDIE_ROCK"]})
+    p = Pipeline(sessions, make_http(sessions, w), settings(discogs_token="T"), llm=llm, studio=FakeStudio())
+    p.artists(["검정치마"])
+    assert p.stats["discogs_error"] == 1 and "artist_error" not in p.stats and p.stats["artist_ok"] == 1
+    albums = {json.loads(i.payload_json)["title"]: json.loads(i.payload_json) for i in items(sessions, "ALBUM").values()}
+    assert albums["201"]["physical_albums"] is None                   # 피지컬만 건드리지 않음
+
+
+def test_artist_without_genres_waits_until_genres_are_judged(sessions):
+    """Gemini 한도로 장르를 못 정한 새 아티스트는 HOLD — 아티스트 · 앨범 모두 보내지 않고, 장르를 정한 실행에 함께 감"""
+    from crawler.llm import LlmSkip
+
+    class NoQuota(FakeLlm):
+        def artist_genres(self, name, aliases, albums, label):
+            raise LlmSkip("quota")
+
+    w, studio = web(), FakeStudio()
+    runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, w), settings(), llm=NoQuota(), studio=studio), ["검정치마"])
+    assert items(sessions, "ARTIST")[next(iter(items(sessions, "ARTIST")))].status == "HOLD"
+    assert studio.posts == []                                         # 장르 없는 아티스트도, 그 앨범도 안 감
+
+    studio2 = FakeStudio()
+    llm = FakeLlm(genres={"검정치마": ["INDIE_ROCK"]})
+    runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, w), settings(), llm=llm, studio=studio2), ["검정치마"])
+    assert [path for path, _ in studio2.posts] == [ARTISTS, ALBUMS]
+    assert studio2.posts[0][1]["items"][0]["genres"] == ["INDIE_ROCK"]
+    assert all(a["genres"] == ["INDIE_ROCK"] for a in studio2.posts[1][1]["items"])

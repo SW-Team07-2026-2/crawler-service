@@ -294,7 +294,10 @@ class Pipeline:
         years = [int(g["released_at"][:4]) for g in groups if g["released_at"]]
         physical = None
         if self.settings.discogs_token and mb.get("discogs"):
-            physical = discogs.physical_by_title(self.http, self.settings.discogs_token, mb["discogs"])
+            try:
+                physical = discogs.physical_by_title(self.http, self.settings.discogs_token, mb["discogs"])
+            except Exception as e:   # 피지컬만 건너뜀 (None = Catalog 가 건드리지 않음) — 11/19 지워진 Discogs 아티스트(404)로 아티스트 전체가 빠졌음
+                self._fail("discogs", mb["discogs"], e)
         elif self.settings.discogs_token:
             self.stats["discogs_no_link"] += 1          # MusicBrainz 에 Discogs 연결이 없으면 피지컬은 건드리지 않음
 
@@ -324,8 +327,9 @@ class Pipeline:
             }
             if goods_evidence:
                 artist["evidence"] = goods_evidence      # 출처 — 관리자 확인용 (Studio 가 Catalog 로 보낼 때 뺌)
+            # 장르를 한 번도 정하지 못한 아티스트는 보내지 않고 기다림 (HOLD — 앨범도 아티스트가 간 뒤에) · 11/19 한도 소진으로 장르 없이 22팀이 갔음
             self._upsert(s, "ARTIST", key, artist, identity if judged else "not-judged",
-                         origin=f"https://musicbrainz.org/artist/{mb['mbid']}")
+                         origin=f"https://musicbrainz.org/artist/{mb['mbid']}", status="READY" if judged or genres else "HOLD")
 
             albums = []   # (앨범, 원본 해시, 원래 주소, Discogs 판본, 출처)
             for g in groups:
