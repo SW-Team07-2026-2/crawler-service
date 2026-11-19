@@ -79,3 +79,24 @@ def test_failure_log_label_is_not_mistaken_for_a_secret():
     from crawler.http import redact
     line = "crawl_concert_fetch_failed item=PF1 error=GET https://x/pblprfr/PF1?service=K → 400"
     assert redact(line) == "crawl_concert_fetch_failed item=PF1 error=GET https://x/pblprfr/PF1?service=*** → 400"
+
+
+def test_kopis_errors_are_retried_later_but_other_sites_are_not(sessions):
+    """11/19 KOPIS 가 400 을 주다가 곧 200 — KOPIS 만 30 · 60초 쉬었다가 다시 (그래도 안 되면 그 항목만 실패)"""
+    from crawler.http import Http
+    from conftest import UA
+    answers = {"www.kopis.or.kr": iter([(400, "<html>Bad Request</html>"), (200, "<dbs/>")]),
+               "other.test": iter([(400, "bad")])}
+    sleeps = []
+    http = Http(sessions, UA, fetch=lambda u, h: (200, "") if u.endswith("robots.txt") else next(answers[u.split("/")[2]]),
+                sleep=sleeps.append, fetch_bytes=lambda u, h: next(images))
+    assert http.get("kopis", "https://www.kopis.or.kr/openApi/restful/pblprfr/PF1?service=K") == "<dbs/>"
+    assert [s for s in sleeps if s >= 30] == [30]
+    with pytest.raises(RuntimeError, match="400 bad"):
+        http.get("t", "https://other.test/x")                                   # 다른 사이트는 다시 부르지 않음
+
+    images = iter([(500, b""), (502, b""), (503, b"")])
+    sleeps.clear()
+    with pytest.raises(RuntimeError, match="503"):
+        http.get_bytes("kopis", "https://www.kopis.or.kr/upload/pfmPoster/PF1.gif")   # 30 · 60초 뒤에도 실패 → 그 이미지만
+    assert [s for s in sleeps if s >= 30] == [30, 60]

@@ -612,3 +612,16 @@ def test_gemini_unavailable_defers_the_remaining_concerts_and_the_run_goes_on(se
     assert "concert_llm_quota" not in out["stats"]                               # 한도로 잘못 적지 않음
     assert items(sessions, "CONCERT") == {}                                      # 저장하지 않음 → 다음 실행에 다시
     assert [path for path, _ in studio.posts] == [ARTISTS, ALBUMS]
+
+
+def test_kopis_down_stops_the_concert_loop_after_five_misses_in_a_row(sessions):
+    """다시 불러도 상세가 5번 연달아 실패 → 남은 공연은 하나씩 기다리지 않고 다음 실행에 (실행이 다음 일정까지 늘어지지 않게)"""
+    w, studio = web(), FakeStudio()
+    ids = [f"PF{n}00" for n in range(1, 8)]
+    w.add("pblprfr?service=KEY", "<dbs>" + "".join(f"<db><mt20id>{i}</mt20id></db>" for i in ids) + "</dbs>")
+    for i in ids:
+        w.add(f"pblprfr/{i}?", "", status=500)
+    out = runner.run("dawn", sessions, pipeline(sessions, w, studio), ["검정치마"])
+    assert out["stats"]["concert_fetch_error"] == 5 and out["stats"]["concert_kopis_down"] == 1
+    assert not any("pblprfr/PF600" in u or "pblprfr/PF700" in u for u in w.calls)
+    assert out["status"] == "DONE" and [path for path, _ in studio.posts] == [ARTISTS, ALBUMS]
