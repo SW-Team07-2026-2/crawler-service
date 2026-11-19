@@ -80,6 +80,19 @@ def test_minute_limit_waits_retry_delay_then_daily_limit_stops_the_rest_of_the_r
     assert len(llm.client.models.requests) == 3
 
 
+def test_server_error_that_keeps_coming_stops_the_rest_of_the_run_not_the_stage():
+    """11/19 503 "high demand" 가 20분 이어져 공연 단계 전체가 멈췄음 → 이유 unavailable 로 남은 호출만 건너뜀"""
+    busy = lambda: errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
+    sleeps = []
+    llm = llm_with(*[busy() for _ in range(4)], sleeps=sleeps)
+    with pytest.raises(LlmSkip, match="unavailable"):
+        llm.concert({"detail": {"mt20id": "PF1"}})
+    assert sleeps == [15, 30, 60] and llm.exhausted and llm.stop_reason == "unavailable"
+    with pytest.raises(LlmSkip, match="unavailable"):              # 남은 호출은 API 를 부르지 않음
+        llm.artist_genres("A", [], [], None)
+    assert len(llm.client.models.requests) == 4
+
+
 def test_bad_request_skips_only_that_item_but_auth_errors_stop_the_run():
     with pytest.raises(LlmSkip, match="rejected"):
         llm_with(errors.ClientError(400, {"error": {"code": 400, "message": "bad image"}})).concert({"mt20id": "PF1"})

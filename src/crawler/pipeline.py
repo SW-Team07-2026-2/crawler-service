@@ -99,8 +99,8 @@ class Pipeline:
                     if item.status != "SKIPPED":
                         names += json.loads(item.payload_json)["concert"]["artistNames"]
                     continue
-            if getattr(self.llm, "exhausted", False):   # 하루 한도를 다 씀 — 이미지를 받지 않고 다음 실행에
-                self.stats["concert_llm_quota"] += 1
+            if getattr(self.llm, "exhausted", False):   # 하루 한도를 다 씀 · 서버가 계속 응답 못 함 — 이미지를 받지 않고 다음 실행에
+                self.stats[f"concert_llm_{getattr(self.llm, 'stop_reason', 'quota')}"] += 1
                 continue
             facts = {"detail": {k: v for k, v in detail.items() if k not in _SKIP_FOR_LLM}, "venue": venue,
                      "knownArtists": _mentioned(known, detail)}
@@ -200,7 +200,7 @@ class Pipeline:
                 found = self.searcher.ticket_open({k: concert[k] for k in ("title", "artistNames", "venueName", "startsAt")})
             except LlmSkip as e:
                 self.stats[f"concert_ticket_llm_{e}"] += 1
-                if str(e) in ("quota", "search_quota"):
+                if str(e) in ("quota", "unavailable", "search_quota"):
                     continue                                                 # 표시하지 않음 → 다음 실행에 다시
                 found = None
             except Exception as e:
@@ -536,7 +536,7 @@ class Pipeline:
 
     def _fail(self, what, key, e):
         self.stats[f"{what}_error"] += 1
-        log.warning("crawl_%s_failed key=%s error=%s", what, key, str(e)[:300])
+        log.warning("crawl_%s_failed item=%s error=%s", what, key, str(e)[:300])   # key= 는 로그 가림 필터가 비밀로 봄 (11/19)
 
 
 def _same_album(title: str, titles: list[str]) -> str | None:
