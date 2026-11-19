@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 # MusicBrainz 의 robots.txt 는 검색 로봇용으로 /ws 를 막지만, API 이용 정책(doc/MusicBrainz_API/Rate_Limiting)이
 # 앱의 사용을 허락합니다 — 조건: IP 당 평균 초당 1건 · 연락처가 든 User-Agent · 정해진 시각에 몰아서 부르지 않기.
 API_POLICY = {("musicbrainz.org", "/ws/2/"): 1.5}   # 초당 1건보다 넉넉히 (1.1초 간격에서도 503 이 났음)
-_SECRET_PARAMS = re.compile(r"(service|token|key)=[^&]+", re.I)
+_SECRET_PARAMS = re.compile(r"(service|token|key)=[^&\s]+", re.I)   # 공백에서 멈춤 — 주소 끝의 키 뒤 상태 · 본문까지 지우던 것 (11/19)
 
 
 class Blocked(Exception):

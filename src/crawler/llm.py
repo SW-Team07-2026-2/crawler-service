@@ -7,6 +7,8 @@
   (도구 결과를 기록해 지어낸 출처를 거르기 위해 · sources/websearch.py).
 - 무료 등급 한도: 분당 요청 수를 넘지 않게 호출 사이를 띄우고, 429 는 API 가 알려 준 시간만큼 쉬었다가 다시.
   하루 한도(PerDay)를 다 쓰면 이번 실행의 남은 호출은 모두 건너뜁니다 (LlmSkip("quota") — 다음 실행에 이어서).
+  서버 오류(500 · 503 · 504)가 다시 불러도 계속되면 똑같이 남은 호출을 건너뜁니다 (LlmSkip("unavailable") ·
+  11/19 503 "high demand" 가 20분 이어져 공연 단계 전체가 멈췄음 — 다른 단계는 끝까지 돌고 남은 것은 다음 실행에).
 """
 import json
 import logging
@@ -86,7 +88,8 @@ class Llm:
         self.model = model
         self.input_tokens = 0
         self.output_tokens = 0          # 생각 토큰 포함
-        self.exhausted = False          # 하루 한도를 다 씀 → 이번 실행의 남은 호출은 건너뜀
+        self.exhausted = False          # 하루 한도를 다 씀 · 서버가 계속 응답 못 함 → 이번 실행의 남은 호출은 건너뜀
+        self.stop_reason = "quota"      # exhausted 의 이유: quota · unavailable
         self._sleep = sleep
         self._gap = gap
         self._last: float | None = None
@@ -124,7 +127,7 @@ class Llm:
 
     def _generate(self, contents, config):
         if self.exhausted:
-            raise LlmSkip("quota")
+            raise LlmSkip(self.stop_reason)
         for attempt in range(TRIES):
             self._wait()
             try:
@@ -140,6 +143,10 @@ class Llm:
                 if e.code == 429:
                     self.exhausted = True
                     raise LlmSkip("quota") from None
+                if e.code in (500, 503, 504):
+                    self.exhausted, self.stop_reason = True, "unavailable"
+                    log.warning("llm_unavailable model=%s error=%s", self.model, str(e)[:300])
+                    raise LlmSkip("unavailable") from None
                 if e.code == 400:                      # 그 요청만 문제 (이미지 · 글) — 실행 전체를 멈추지 않음
                     log.warning("llm_rejected model=%s error=%s", self.model, str(e)[:300])
                     raise LlmSkip("rejected") from None
