@@ -26,17 +26,25 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
         s.commit()
         run_id = row.id
 
-    status, error = "DONE", None
-    try:
-        found = pipeline.concerts()
-        if kind == "dawn":
-            found += pipeline.indistreet()       # 인디스트릿 최근 발매 — 아티스트 이름은 새 아티스트 찾기에도
-            pipeline.artists(seeds + _new_names(sessions, found))
-            pipeline.refresh_known()             # 시드 · 공연에 없는, 전에 찾은 아티스트의 신보
-        pipeline.send()
-    except Exception as e:  # 기록하고 다음 실행에 다시
-        status, error = "FAILED", f"{type(e).__name__}: {e}"[:2000]
-        log.exception("crawl_run_failed kind=%s run=%s", kind, run_id)
+    errors: list[str] = []
+
+    def stage(name, fn):
+        """단계 하나 — 실패해도 다음 단계는 계속 (11/19 KOPIS 목록 400 하나로 새벽 실행 전체가 멈췄음). 실패한 단계는 다음 실행에 다시"""
+        try:
+            return fn()
+        except Exception as e:
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+            log.exception("crawl_stage_failed kind=%s run=%s stage=%s", kind, run_id, name)
+            return None
+
+    found = stage("공연", pipeline.concerts) or []
+    if kind == "dawn":
+        found += stage("인디스트릿", pipeline.indistreet) or []   # 인디스트릿 최근 발매 — 아티스트 이름은 새 아티스트 찾기에도
+        stage("아티스트", lambda: pipeline.artists(seeds + _new_names(sessions, found)))
+        stage("다시 보기", pipeline.refresh_known)                # 시드 · 공연에 없는, 전에 찾은 아티스트의 신보
+    stage("전송", pipeline.send)
+    status = "FAILED" if errors else "DONE"
+    error = " | ".join(errors)[:2000] or None
 
     llm = pipeline.llm
     with sessions() as s:
