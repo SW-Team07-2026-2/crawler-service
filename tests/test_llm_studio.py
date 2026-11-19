@@ -84,13 +84,20 @@ def test_server_error_that_keeps_coming_stops_the_rest_of_the_run_not_the_stage(
     """11/19 503 "high demand" 가 20분 이어져 공연 단계 전체가 멈췄음 → 이유 unavailable 로 남은 호출만 건너뜀"""
     busy = lambda: errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
     sleeps = []
-    llm = llm_with(*[busy() for _ in range(4)], sleeps=sleeps)
+    llm = llm_with(*[busy() for _ in range(5)], sleeps=sleeps)
     with pytest.raises(LlmSkip, match="unavailable"):
         llm.concert({"detail": {"mt20id": "PF1"}})
-    assert sleeps == [15, 30, 60] and llm.exhausted and llm.stop_reason == "unavailable"
+    assert sleeps == [60, 120, 240, 480] and llm.exhausted and llm.stop_reason == "unavailable"   # 1 · 2 · 4 · 8분 기다린 뒤에야
     with pytest.raises(LlmSkip, match="unavailable"):              # 남은 호출은 API 를 부르지 않음
         llm.artist_genres("A", [], [], None)
-    assert len(llm.client.models.requests) == 4
+    assert len(llm.client.models.requests) == 5
+
+
+def test_server_error_that_passes_within_the_waits_is_just_a_delay():
+    busy = lambda: errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
+    sleeps = []
+    llm = llm_with(busy(), busy(), busy(), response('{"genres": ["EMO"]}'), sleeps=sleeps)
+    assert llm.artist_genres("A", [], [], None) == ["EMO"] and sleeps == [60, 120, 240] and not llm.exhausted
 
 
 def test_bad_request_skips_only_that_item_but_auth_errors_stop_the_run():
