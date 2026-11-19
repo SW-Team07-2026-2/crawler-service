@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 # MusicBrainz 의 robots.txt 는 검색 로봇용으로 /ws 를 막지만, API 이용 정책(doc/MusicBrainz_API/Rate_Limiting)이
 # 앱의 사용을 허락합니다 — 조건: IP 당 평균 초당 1건 · 연락처가 든 User-Agent · 정해진 시각에 몰아서 부르지 않기.
 API_POLICY = {("musicbrainz.org", "/ws/2/"): 1.5}   # 초당 1건보다 넉넉히 (1.1초 간격에서도 503 이 났음)
+# 잠깐 오류(400 · 5xx)를 주다가 곧 돌아오는 사이트 — 오류면 이만큼(초) 쉬었다가 다시 (11/19 KOPIS: 03:43 목록 · 10:17 상세 8건이 400 등,
+# 같은 주소를 다시 부르면 200). 그래도 안 되면 그 항목만 실패 → 다음 실행에
+RETRY_LATER = {"www.kopis.or.kr": (30, 60)}
 _SECRET_PARAMS = re.compile(r"(service|token|key)=[^&\s]+", re.I)   # 공백에서 멈춤 — 주소 끝의 키 뒤 상태 · 본문까지 지우던 것 (11/19)
 
 
@@ -62,7 +65,7 @@ class Http:
             interval = max(self.default_interval, rp.crawl_delay(self.user_agent) or 0)   # robots.txt 의 Crawl-delay 를 따름
         self._wait(parts.netloc, interval)
 
-        status, body = self._get_with_retry(url, headers or {})
+        status, body = self._later(parts.hostname, lambda: self._get_with_retry(url, headers or {}))
         if status >= 400:   # 본문 앞부분도 남김 — 11/19 KOPIS 400 은 본문이 없어 원인을 알 수 없었음
             raise RuntimeError(f"GET {safe} → {status} {redact(' '.join(body.split()))[:200]}".rstrip())
         with self.sessions() as s:
@@ -82,7 +85,7 @@ class Http:
         if not rp.can_fetch(self.user_agent, parts.geturl()):
             raise Blocked(redact(url))
         self._wait(parts.netloc, max(self.default_interval, rp.crawl_delay(self.user_agent) or 0))
-        status, body = self._fetch_bytes(url, {"User-Agent": self.user_agent})
+        status, body = self._later(parts.hostname, lambda: self._fetch_bytes(url, {"User-Agent": self.user_agent}))
         if status >= 400:
             raise RuntimeError(f"GET {redact(url)} → {status}")
         if len(body) > max_bytes:
@@ -98,6 +101,17 @@ class Http:
             raise Blocked(redact(url))
         if wait:
             self._wait(parts.netloc, max(self.default_interval, rp.crawl_delay(self.user_agent) or 0))
+
+    def _later(self, host, call):
+        """call() → (상태, 본문). RETRY_LATER 사이트면 오류일 때 쉬었다가 다시"""
+        status, body = call()
+        for wait in RETRY_LATER.get(host, ()):
+            if status < 400:
+                break
+            log.info("retry_later host=%s status=%s wait=%ss", host, status, wait)
+            self._sleep(wait)
+            status, body = call()
+        return status, body
 
     def _get_with_retry(self, url, headers, tries: int = 5):   # 2 · 4 · 8 · 16초 쉬며 (느려도 괜찮음 · 11/17)
         for attempt in range(tries):

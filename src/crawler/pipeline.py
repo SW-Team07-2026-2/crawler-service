@@ -42,6 +42,7 @@ _SKIP_FOR_LLM = {"poster", "styurls"}  # 이미지는 주소 대신 이미지로
 CONCERT_VERSION = 2                    # 공연 정리 방식(프롬프트 · 입력)이 바뀌면 올림 → 같은 원문도 다시 정리
 KOPIS_HOSTS = {"www.kopis.or.kr", "kopis.or.kr"}   # Studio 가 승인할 때 옮겨 오는 곳 (app.image.import-hosts 와 같음)
 MAX_IMAGE_URLS = 20                    # Concert imageUrls 상한
+KOPIS_DOWN = 5                         # 공연 상세가 (다시 불러도) 이만큼 연달아 실패하면 KOPIS 가 내려간 것으로 보고 남은 공연은 다음 실행에
 MAX_CAST_LOOKUPS = 20                  # 팀을 못 찾은 출연진을 MusicBrainz 에서 볼 최대 수 (공연 한 건)
 RECENT = timedelta(days=180)           # 이보다 최근 앨범은 트랙 · 레이블을 7일마다 다시 봄 (그 전은 90일)
 WEB_EVERY = timedelta(days=7)          # 아티스트마다 웹 검색은 7일에 한 번
@@ -77,12 +78,18 @@ class Pipeline:
         start, end = kopis.window(self.settings.concert_days)
         known = self._known_names()
         names: list[str] = []
+        misses = 0
         for mt20id in kopis.list_ids(self.http, key, start, end):
             try:
                 detail = kopis.detail(self.http, key, mt20id)
             except Exception as e:  # 한 건 실패로 실행 전체를 멈추지 않음
                 self._fail("concert_fetch", mt20id, e)
+                misses += 1
+                if misses >= KOPIS_DOWN:   # 다시 불러도 계속 실패 — 남은 공연을 하나씩 기다리지 않음 (실행이 다음 일정까지 늘어지지 않게)
+                    self.stats["concert_kopis_down"] += 1
+                    break
                 continue
+            misses = 0
             if not detail:
                 continue
             try:
