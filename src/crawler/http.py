@@ -63,8 +63,8 @@ class Http:
         self._wait(parts.netloc, interval)
 
         status, body = self._get_with_retry(url, headers or {})
-        if status >= 400:
-            raise RuntimeError(f"GET {safe} → {status}")
+        if status >= 400:   # 본문 앞부분도 남김 — 11/19 KOPIS 400 은 본문이 없어 원인을 알 수 없었음
+            raise RuntimeError(f"GET {safe} → {status} {redact(' '.join(body.split()))[:200]}".rstrip())
         with self.sessions() as s:
             page = s.scalar(select(dbm.RawPage).where(dbm.RawPage.url_hash == url_hash))
             if page is None:

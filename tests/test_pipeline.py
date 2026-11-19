@@ -578,3 +578,16 @@ def test_album_key_for_keeps_same_title_single_and_album_apart(sessions):
         assert dbm.album_key_for(s, "a-1", "SINGLE", "Same", rgid="rg3") == "b-rg3"      # 종류가 다르면 다른 앨범
         assert dbm.album_key_for(s, "a-1", "ALBUM", "Same", rgid="rg1") == web_key       # 이미 이은 것은 그대로
         assert dbm.album_key_for(s, "a-2", "ALBUM", "Same") != web_key                  # 다른 아티스트
+
+
+def test_failed_stage_does_not_stop_the_rest_of_the_run(sessions):
+    """11/19 KOPIS 목록 400 하나로 새벽 실행 전체가 멈췄음 → 공연만 실패로 남고 아티스트 · 앨범은 그대로 보냄"""
+    w, studio = web(), FakeStudio()
+    w.add("pblprfr?service=KEY", "<html><body>Bad Request</body></html>", status=400)
+    out = runner.run("dawn", sessions, pipeline(sessions, w, studio), ["검정치마"])
+    assert out["status"] == "FAILED"
+    assert out["error"].startswith("공연: RuntimeError: GET ") and "service=***" in out["error"]
+    assert out["error"].endswith("→ 400 <html><body>Bad Request</body></html>")       # 응답 본문도 남김
+    assert [path for path, _ in studio.posts] == [ARTISTS, ALBUMS]                   # 공연 말고는 보냄
+    with sessions() as s:
+        assert s.get(dbm.CrawlRun, out["run"]).status == "FAILED"
