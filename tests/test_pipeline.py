@@ -591,3 +591,24 @@ def test_failed_stage_does_not_stop_the_rest_of_the_run(sessions):
     assert [path for path, _ in studio.posts] == [ARTISTS, ALBUMS]                   # 공연 말고는 보냄
     with sessions() as s:
         assert s.get(dbm.CrawlRun, out["run"]).status == "FAILED"
+
+
+def test_gemini_unavailable_defers_the_remaining_concerts_and_the_run_goes_on(sessions):
+    """Gemini 가 계속 503 → 남은 공연은 다음 실행에, 아티스트 · 앨범은 그대로 보내고 실행은 DONE"""
+    from crawler.llm import LlmSkip
+
+    class BusyLlm(FakeLlm):
+        exhausted, stop_reason = False, "quota"
+
+        def concert(self, facts, images=None):
+            self.exhausted, self.stop_reason = True, "unavailable"
+            raise LlmSkip("unavailable")
+
+    w, studio = web(), FakeStudio()
+    llm = BusyLlm(genres={"검정치마": ["INDIE_ROCK"]})
+    out = runner.run("dawn", sessions, pipeline(sessions, w, studio, llm), ["검정치마"])
+    assert out["status"] == "DONE" and out["error"] is None
+    assert out["stats"]["concert_llm_unavailable"] == 2                          # 첫 공연은 503 · 둘째는 부르지도 않음
+    assert "concert_llm_quota" not in out["stats"]                               # 한도로 잘못 적지 않음
+    assert items(sessions, "CONCERT") == {}                                      # 저장하지 않음 → 다음 실행에 다시
+    assert [path for path, _ in studio.posts] == [ARTISTS, ALBUMS]

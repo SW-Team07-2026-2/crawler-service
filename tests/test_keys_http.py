@@ -73,3 +73,9 @@ def test_log_filter_hides_keys_whoever_logs_the_url():
     from crawler.__main__ import _Redact
     rec = logging.LogRecord("scrapling", logging.WARNING, __file__, 1, "Fetched <GET %s>", ("https://x/a?service=SECRET&b=1",), None)
     assert _Redact().filter(rec) and rec.getMessage() == "Fetched <GET https://x/a?service=***&b=1>"
+
+
+def test_failure_log_label_is_not_mistaken_for_a_secret():
+    from crawler.http import redact
+    line = "crawl_concert_fetch_failed item=PF1 error=GET https://x/pblprfr/PF1?service=K → 400"
+    assert redact(line) == "crawl_concert_fetch_failed item=PF1 error=GET https://x/pblprfr/PF1?service=*** → 400"
