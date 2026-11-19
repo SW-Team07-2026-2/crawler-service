@@ -52,7 +52,8 @@ class RawPage(Base):
 
 class Item(Base):
     """전처리한 항목 하나 — Studio 로 보낼 모양 그대로 (payload_json). 열쇠는 (type, key) = Studio 의 external_id.
-    상태: READY(보낼 것) → SENT · FAILED(Studio 가 거절 · 사유 error) · SKIPPED(인디 공연이 아님 등 · 보내지 않음)"""
+    상태: READY(보낼 것) → SENT · FAILED(Studio 가 거절 · 사유 error) · SKIPPED(인디 공연이 아님 등 · 보내지 않음)
+    · HOLD(장르를 아직 못 정한 아티스트 — 정하면 READY)"""
     __tablename__ = "item"
     __table_args__ = (UniqueConstraint("type", "key"),)
     id: Mapped[int] = mapped_column(Id, primary_key=True, autoincrement=True)
