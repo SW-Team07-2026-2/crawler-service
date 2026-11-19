@@ -7,7 +7,7 @@
   (도구 결과를 기록해 지어낸 출처를 거르기 위해 · sources/websearch.py).
 - 무료 등급 한도: 분당 요청 수를 넘지 않게 호출 사이를 띄우고, 429 는 API 가 알려 준 시간만큼 쉬었다가 다시.
   하루 한도(PerDay)를 다 쓰면 이번 실행의 남은 호출은 모두 건너뜁니다 (LlmSkip("quota") — 다음 실행에 이어서).
-  서버 오류(500 · 503 · 504)가 다시 불러도 계속되면 똑같이 남은 호출을 건너뜁니다 (LlmSkip("unavailable") ·
+  서버 오류(500 · 503 · 504)는 1 · 2 · 4 · 8분 쉬며 다시 부르고, 그래도 계속되면 똑같이 남은 호출을 건너뜁니다 (LlmSkip("unavailable") ·
   11/19 503 "high demand" 가 20분 이어져 공연 단계 전체가 멈췄음 — 다른 단계는 끝까지 돌고 남은 것은 다음 실행에).
 """
 import json
@@ -24,7 +24,8 @@ log = logging.getLogger(__name__)
 
 MAX_TOKENS = 16000     # 생각 토큰 포함
 GAP = 6.5              # 호출 사이 최소 간격(초) — 무료 등급 분당 10건 안팎 (공식 수치 비공개 · 11/18 사용자 측정 보고 기준)
-TRIES = 4              # 분당 한도 · 서버 오류(500 · 503 · 504) 때 다시 부르는 횟수
+TRIES = 4              # 분당 한도(429) 때 다시 부르는 횟수
+SERVER_WAITS = (60, 120, 240, 480)   # 서버 오류(500 · 503 · 504) 때 쉬는 시간(초) — 11/19 503 혼잡이 20분 띄엄띄엄 이어짐 (느려도 괜찮음 · 11/17)
 TURNS = 16             # 웹 조사 한 번에 모델이 도구를 부르는 최대 차례
 
 
@@ -128,7 +129,8 @@ class Llm:
     def _generate(self, contents, config):
         if self.exhausted:
             raise LlmSkip(self.stop_reason)
-        for attempt in range(TRIES):
+        limited = busy = 0                             # 분당 한도 · 서버 오류로 다시 부른 횟수
+        while True:
             self._wait()
             try:
                 r = self.client.models.generate_content(model=self.model, contents=contents, config=config)
@@ -137,8 +139,13 @@ class Llm:
                     self.exhausted = True
                     log.warning("llm_daily_quota_exhausted model=%s", self.model)
                     raise LlmSkip("quota") from None
-                if e.code in (429, 500, 503, 504) and attempt < TRIES - 1:
-                    self._sleep(_retry_after(e) or 15 * 2 ** attempt)
+                if e.code == 429 and limited < TRIES - 1:
+                    self._sleep(_retry_after(e) or 15 * 2 ** limited)
+                    limited += 1
+                    continue
+                if e.code in (500, 503, 504) and busy < len(SERVER_WAITS):
+                    self._sleep(SERVER_WAITS[busy])
+                    busy += 1
                     continue
                 if e.code == 429:
                     self.exhausted = True
@@ -158,7 +165,6 @@ class Llm:
             if reason != types.FinishReason.STOP:       # MAX_TOKENS · SAFETY · RECITATION …
                 raise LlmSkip((reason.name if reason else "no_candidate").lower())
             return r
-        raise AssertionError("unreachable")
 
     def _wait(self):
         if self._last is not None:
