@@ -27,7 +27,7 @@ TAVILY_URL = "https://api.tavily.com/search"
 EXCLUDE_DOMAINS = ["spotify.com", "open.spotify.com"]
 
 
-RUN_BUDGET = 15   # 실행 한 번에 쓸 검색 크레딧 — 무료 월 1,000 ÷ (하루 2번 × 30일) ≈ 16
+RUN_BUDGET = 20   # 실행 한 번에 쓸 검색 크레딧 — 11/22 15 → 20. 새벽 20 + 점심 10(예매 오픈만 · TICKET_SEARCHES) = 하루 30 · 월 약 900 (무료 1,000 · 손 실행 · 재시도 몫 남김)
 
 
 class SearchQuota(Exception):
