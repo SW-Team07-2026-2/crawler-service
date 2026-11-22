@@ -593,6 +593,33 @@ def test_failed_stage_does_not_stop_the_rest_of_the_run(sessions):
         assert s.get(dbm.CrawlRun, out["run"]).status == "FAILED"
 
 
+def test_dawn_retries_the_failed_concert_stage_at_the_end(sessions):
+    """11/22 KOPIS 차단(Request Blocked)이 몇 분 이어져 공연 단계만 실패 → 새벽 실행은 아티스트 단계 뒤 한 번 더"""
+    w, studio = web(), FakeStudio()
+    p = pipeline(sessions, w, studio)
+    real, calls = p.concerts, []
+
+    def blocked_then_ok():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("GET ... → 400 Request Blocked")
+        return real()
+    p.concerts = blocked_then_ok
+    out = runner.run("dawn", sessions, p, ["검정치마"])
+    assert len(calls) == 2 and out["status"] == "DONE" and out["error"] is None
+    assert out["stats"]["concert_stage_retry"] == 1 and out["stats"]["send_concert_created"] == 1
+
+    p2 = pipeline(sessions, web(), FakeStudio())
+    p2.concerts = lambda: (_ for _ in ()).throw(RuntimeError("still blocked"))
+    out2 = runner.run("dawn", sessions, p2, [])
+    assert out2["status"] == "FAILED" and out2["error"].startswith("공연: RuntimeError: still blocked")
+    assert "공연 다시" in out2["error"]                                  # 두 번 다 실패하면 둘 다 남김
+
+    p3, lunch_calls = pipeline(sessions, web(), FakeStudio()), []
+    p3.concerts = lambda: lunch_calls.append(1) or (_ for _ in ()).throw(RuntimeError("blocked"))
+    assert runner.run("lunch", sessions, p3, [])["status"] == "FAILED" and len(lunch_calls) == 1   # 점심은 다시 안 함
+
+
 def test_gemini_unavailable_defers_the_remaining_concerts_and_the_run_goes_on(sessions):
     """Gemini 가 계속 503 → 남은 공연은 다음 실행에, 아티스트 · 앨범은 그대로 보내고 실행은 DONE"""
     from crawler.llm import LlmSkip
