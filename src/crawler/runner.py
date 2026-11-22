@@ -38,10 +38,16 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
             return None
 
     found = stage("공연", pipeline.concerts) or []
+    concerts_failed = bool(errors)
     if kind == "dawn":
         found += stage("인디스트릿", pipeline.indistreet) or []   # 인디스트릿 최근 발매 — 아티스트 이름은 새 아티스트 찾기에도
         stage("아티스트", lambda: pipeline.artists(seeds + _new_names(sessions, found)))
         stage("다시 보기", pipeline.refresh_known)                # 시드 · 공연에 없는, 전에 찾은 아티스트의 신보
+        if concerts_failed:   # 한 번 더 — 11/22 KOPIS 차단이 몇 분 이어져 공연만 실패 · 아티스트 단계(1~3시간) 뒤엔 풀려 있을 때가 많음
+            first = errors.pop(0)
+            pipeline.stats["concert_stage_retry"] += 1
+            if stage("공연 다시", pipeline.concerts) is None:
+                errors.insert(0, first)
     stage("전송", pipeline.send)
     status = "FAILED" if errors else "DONE"
     error = " | ".join(errors)[:2000] or None

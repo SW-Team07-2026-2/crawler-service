@@ -24,6 +24,8 @@ API_POLICY = {("musicbrainz.org", "/ws/2/"): 1.5}   # 초당 1건보다 넉넉�
 # 잠깐 오류(400 · 5xx)를 주다가 곧 돌아오는 사이트 — 오류면 이만큼(초) 쉬었다가 다시 (11/19 KOPIS: 03:43 목록 · 10:17 상세 8건이 400 등,
 # 같은 주소를 다시 부르면 200). 그래도 안 되면 그 항목만 실패 → 다음 실행에
 RETRY_LATER = {"www.kopis.or.kr": (30, 60)}
+# 사이트별 최소 간격(초) — 11/20~22 KOPIS 가 1초 간격 연속 요청을 수시로 막음(400 "Request Blocked" · 새벽 실행마다 18~19번 · 11/22 는 목록부터)
+HOST_INTERVAL = {"www.kopis.or.kr": 3.0}
 _SECRET_PARAMS = re.compile(r"(service|token|key)=[^&\s]+", re.I)   # 공백에서 멈춤 — 주소 끝의 키 뒤 상태 · 본문까지 지우던 것 (11/19)
 
 
@@ -139,6 +141,7 @@ class Http:
         return rp
 
     def _wait(self, host: str, interval: float):
+        interval = max(interval, HOST_INTERVAL.get(host, 0))
         last = self._last.get(host)
         if last is not None:
             gap = time.monotonic() - last

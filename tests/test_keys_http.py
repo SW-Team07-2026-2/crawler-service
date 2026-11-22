@@ -100,3 +100,18 @@ def test_kopis_errors_are_retried_later_but_other_sites_are_not(sessions):
     with pytest.raises(RuntimeError, match="503"):
         http.get_bytes("kopis", "https://www.kopis.or.kr/upload/pfmPoster/PF1.gif")   # 30 · 60초 뒤에도 실패 → 그 이미지만
     assert [s for s in sleeps if s >= 30] == [30, 60]
+
+
+def test_kopis_requests_are_spaced_three_seconds_apart(sessions):
+    """11/20~22 KOPIS 가 1초 간격 연속 요청을 수시로 막음 → KOPIS 만 3초 간격"""
+    from crawler.http import Http
+    from conftest import UA
+    sleeps = []
+    http = Http(sessions, UA, fetch=lambda u, h: (200, "<dbs/>"), sleep=sleeps.append)
+    http.get("kopis", "https://www.kopis.or.kr/openApi/restful/pblprfr/PF1?service=K")
+    http.get("kopis", "https://www.kopis.or.kr/openApi/restful/pblprfr/PF2?service=K")
+    assert len(sleeps) == 1 and 2.9 < sleeps[0] <= 3.0
+    sleeps.clear()
+    http.get("t", "https://other.test/a")
+    http.get("t", "https://other.test/b")
+    assert len(sleeps) == 1 and sleeps[0] <= 1.0                         # 다른 사이트는 그대로 1초
