@@ -68,12 +68,44 @@ def _in_korea(http, area: dict | None, depth: int = 0) -> bool:
 
 
 def artist(http, mbid: str) -> dict:
-    """discogs: MusicBrainz 편집자가 이어 둔 Discogs 아티스트 id (하나일 때만 — 이름으로 찾으면 동명이인이 섞임)"""
-    a = _get(http, f"artist/{mbid}?inc=aliases+url-rels&fmt=json", days=7)
+    """discogs: MusicBrainz 편집자가 이어 둔 Discogs 아티스트 id (하나일 때만 — 이름으로 찾으면 동명이인이 섞임)
+    gender · composition: 11/22 Catalog 필터 값 (lineup 참고) — 확실하지 않으면 None"""
+    a = _get(http, f"artist/{mbid}?inc=aliases+url-rels+artist-rels&fmt=json", days=7)
     links = {r["url"]["resource"].rstrip("/").rsplit("/", 1)[-1] for r in a.get("relations", [])
              if r.get("type") == "discogs" and "/artist/" in r.get("url", {}).get("resource", "")}
+    gender, composition = lineup(http, a)
     return {"mbid": a["id"], "name": a["name"], "aliases": sorted({x["name"] for x in a.get("aliases", [])} - {a["name"]}),
-            "discogs": links.pop() if len(links) == 1 else None}
+            "discogs": links.pop() if len(links) == 1 else None, "gender": gender, "composition": composition}
+
+
+GENDERS = {"Male": "MALE", "Female": "FEMALE"}   # Other · Non-binary · Not applicable 은 Catalog 값이 없음 → None
+
+
+def lineup(http, a: dict) -> tuple[str | None, str | None]:
+    """(성별, 구성) — 구성은 지금 활동 인원으로 정합니다 (팀 이름이어도 한 명만 남았으면 SOLO).
+    사람(Person)은 SOLO · 성별 그대로. 팀은 "member of band" 중 끝나지 않은 멤버로:
+    두 명 이상이면 GROUP, 한 명이면 떠난 멤버 기록이 있을 때만 SOLO (멤버를 한 명만 적어 둔 팀일 수 있어서 그 외엔 None).
+    팀 성별은 지금 멤버를 하나씩 조회해 남녀가 섞이면 MIXED, 모두 같으면 그 성별, 하나라도 모르면 None."""
+    if a.get("type") == "Person":
+        return GENDERS.get(a.get("gender")), "SOLO"
+    if a.get("type") not in ("Group", "Orchestra", "Choir"):
+        return None, None
+    current, past = set(), set()
+    for r in a.get("relations", []):
+        member = r.get("artist", {}).get("id")
+        if r.get("type") == "member of band" and r.get("direction") == "backward" and member:
+            (past if r.get("ended") else current).add(member)
+    past -= current                                  # 나갔다가 돌아온 멤버는 지금 멤버
+    if len(current) >= 2:
+        composition = "GROUP"
+    elif len(current) == 1 and past:
+        composition = "SOLO"
+    else:
+        return None, None
+    genders = {GENDERS.get(_get(http, f"artist/{m}?fmt=json", days=30).get("gender")) for m in sorted(current)}
+    if {"MALE", "FEMALE"} <= genders:
+        return "MIXED", composition
+    return (genders.pop() if len(genders) == 1 and None not in genders else None), composition
 
 
 def release_groups(http, mbid: str) -> list[dict]:
