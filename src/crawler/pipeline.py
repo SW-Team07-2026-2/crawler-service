@@ -47,7 +47,7 @@ MAX_CAST_LOOKUPS = 20                  # 팀을 못 찾은 출연진을 MusicBra
 RECENT = timedelta(days=180)           # 이보다 최근 앨범은 트랙 · 레이블을 7일마다 다시 봄 (그 전은 90일)
 WEB_EVERY = timedelta(days=7)          # 아티스트마다 웹 검색은 7일에 한 번
 WEB_ARTISTS_PER_RUN = 30               # 한 번 실행에 웹 검색할 아티스트 수 — 나머지는 다음 새벽에 (실행이 너무 길어지지 않게)
-TICKET_SEARCHES = 8                    # 한 번 실행에 예매 오픈 찾기에 쓸 검색 크레딧 — 나머지는 아티스트 조사에
+TICKET_SEARCHES = 10                   # 한 번 실행에 예매 오픈 찾기에 쓸 검색 크레딧 (11/22 8 → 10) — 나머지는 아티스트 조사에
 SEARCH_NAMES = 3                       # 김밥레코즈 검색어로 쓸 이름 수 (한글 이름 먼저)
 
 
