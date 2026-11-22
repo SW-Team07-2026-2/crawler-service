@@ -25,6 +25,7 @@ from sqlalchemy import select
 
 from . import db as dbm
 from . import images as imgs
+from .enums import ARTIST_COMPOSITIONS, ARTIST_GENDERS
 from .keys import content_hash, norm
 from .llm import LlmSkip
 from .sources import discogs, gimbab, indistreet, kopis, musicbrainz
@@ -332,6 +333,9 @@ class Pipeline:
                 "label": source["label"][:100] if source["label"] else None,
                 "debut_year": min(years) if years else None,
                 "profile_url": None,   # 공개 이미지 버킷이 정해지기 전까지 비움 (계약 3장)
+                # 11/22 성별 · 구성 — 모르면 null (Catalog 가 저장된 값을 그대로 두고 관리자가 승인 때 채움) · 목록 밖 값은 승인 때 400 이라 여기서 거름
+                "gender": mb.get("gender") if mb.get("gender") in ARTIST_GENDERS else None,
+                "composition": mb.get("composition") if mb.get("composition") in ARTIST_COMPOSITIONS else None,
                 "goods": goods,        # 웹 검색으로 찾은 공식 굿즈 (가격은 관리자가) · 없으면 null = Catalog 가 건드리지 않음
             }
             if goods_evidence:

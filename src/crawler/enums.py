@@ -14,3 +14,5 @@ REGIONS = [
 CONCERT_TYPES = ["SOLO", "FESTIVAL"]
 GOODS_CATEGORIES = ["TSHIRT", "OUTER", "KEYRING", "PICK", "MUFFLER", "SCARF", "BAG", "HAT", "ETC"]
 OPTION_SIZES = ["XS", "S", "M", "L", "XL", "XXL", "FREE"]
+ARTIST_GENDERS = ["MALE", "FEMALE", "MIXED"]     # 11/22 catalog ArtistGender · 목록 밖 값은 승인 때 400
+ARTIST_COMPOSITIONS = ["SOLO", "GROUP"]          # 11/22 catalog ArtistComposition

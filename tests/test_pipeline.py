@@ -64,6 +64,7 @@ def test_dawn_collects_preprocesses_and_sends_in_contract_order(sessions):
     assert bs["source"] == "crawler" and bs["external_id"].startswith("a-")
     assert bs["genres"] == ["INDIE_ROCK"] and bs["label"] == "BESPOK" and bs["debut_year"] == 2011
     assert bs["goods"] is None and bs["profile_url"] is None and len(bs["source_hash"]) == 64
+    assert bs["gender"] is None and bs["composition"] is None    # MusicBrainz 에 종류 · 멤버가 없으면 null (관리자가 승인 때)
 
     albums = {a["title"]: a for a in studio.posts[1][1]["items"]}
     assert albums["201"]["artist_ref"] == {"source": "crawler", "external_id": bs["external_id"]}
@@ -144,6 +145,30 @@ def test_known_artist_is_refreshed_without_seed_or_concert_and_genres_stay(sessi
     runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio(), llm), [])
     assert any("release?release-group=rgC" in c for c in w.calls)
     assert not any("release?release-group=rgB" in c for c in w.calls)
+
+
+def test_gender_and_composition_follow_musicbrainz_lineup_and_resend_only_the_artist(sessions):
+    """11/22 성별 · 구성 — 처음엔 MusicBrainz 에 멤버가 없어 null, 멤버가 생기면 아티스트만 다시 감 (해시가 바뀜 · 장르는 다시 묻지 않음)"""
+    w = web()
+    llm = FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM}, genres={"검정치마": ["INDIE_ROCK"]})
+    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio(), llm), ["검정치마"])
+    llm_calls, before = len(llm.calls), items(sessions, "ARTIST")
+    bs_key = next(k for k, i in before.items() if json.loads(i.payload_json)["name"] == "검정치마")
+
+    w.add("artist/bs?", {"id": "bs", "name": "검정치마", "aliases": [{"name": "검정치마"}], "type": "Group", "relations": [
+        {"type": "member of band", "direction": "backward", "ended": False, "artist": {"id": "jo", "name": "조휴일"}},
+        {"type": "member of band", "direction": "backward", "ended": True, "artist": {"id": "ex", "name": "전 멤버"}}]})
+    w.add("artist/jo?fmt=json", {"id": "jo", "type": "Person", "gender": "Male"})
+    with sessions() as s:                                            # 아티스트 캐시(7일)가 지남
+        s.execute(update(dbm.RawPage).values(fetched_at=dbm.now() - timedelta(days=8)))
+        s.commit()
+    studio = FakeStudio()
+    runner.run("dawn", sessions, pipeline(sessions, w, studio, llm), ["검정치마"])
+    assert [path for path, _ in studio.posts] == [ARTISTS]          # 앨범은 그대로
+    bs = studio.posts[0][1]["items"][0]
+    assert (bs["name"], bs["gender"], bs["composition"]) == ("검정치마", "MALE", "SOLO")   # 한 명만 남은 팀 → 솔로
+    assert bs["genres"] == ["INDIE_ROCK"] and len(llm.calls) == llm_calls
+    assert bs["source_hash"] != before[bs_key].source_hash
 
 
 def test_alias_only_person_without_releases_is_not_created(sessions):

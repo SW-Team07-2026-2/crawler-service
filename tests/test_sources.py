@@ -54,7 +54,8 @@ def mb_web():
 def test_musicbrainz_picks_korean_exact_match_and_filters_groups(sessions):
     http = make_http(sessions, mb_web())
     a = musicbrainz.find_artist(http, "실리카겔")
-    assert a == {"mbid": "kr", "name": "Silica Gel", "aliases": ["실리카겔"], "discogs": "6588484"}
+    assert a == {"mbid": "kr", "name": "Silica Gel", "aliases": ["실리카겔"], "discogs": "6588484",
+                 "gender": None, "composition": None}                 # 종류 · 멤버 기록이 없으면 모름
     assert musicbrainz.find_artist(http, "실리카") is None          # 이름이 정확히 같지 않으면 만들지 않음
 
     groups = musicbrainz.release_groups(http, "kr")
@@ -64,6 +65,33 @@ def test_musicbrainz_picks_korean_exact_match_and_filters_groups(sessions):
     rel = musicbrainz.first_release(http, "rg1")
     assert rel == {"tracks": [{"track_no": 1, "title": "A"}, {"track_no": 2, "title": "B"}, {"track_no": 3, "title": "C"}],
                    "label": "Magic Strawberry Sound"}
+
+
+def _member(mid, ended=False):
+    return {"type": "member of band", "direction": "backward", "ended": ended, "artist": {"id": mid, "name": mid}}
+
+
+@pytest.mark.parametrize("artist, people, expected", [
+    ({"type": "Person", "gender": "Female"}, {}, ("FEMALE", "SOLO")),
+    ({"type": "Person", "gender": "Non-binary"}, {}, (None, "SOLO")),             # Catalog 에 없는 성별은 비움
+    ({"type": "Group", "relations": [_member("m1"), _member("m2")]}, {"m1": "Male", "m2": "Male"}, ("MALE", "GROUP")),
+    ({"type": "Group", "relations": [_member("m1"), _member("m2"), _member("m3")]},
+     {"m1": "Male", "m2": "Female"}, ("MIXED", "GROUP")),                        # 한 명을 몰라도 남녀가 섞였으면 혼성
+    ({"type": "Group", "relations": [_member("m1"), _member("m2")]}, {"m1": "Male"}, (None, "GROUP")),
+    ({"type": "Group", "relations": [_member("m1"), _member("m2", ended=True), _member("m3", ended=True)]},
+     {"m1": "Female"}, ("FEMALE", "SOLO")),                                      # 팀 이름이어도 한 명만 남음
+    ({"type": "Group", "relations": [_member("m1"), _member("m1", ended=True), _member("m2")]},
+     {"m1": "Male", "m2": "Male"}, ("MALE", "GROUP")),                           # 나갔다 돌아온 멤버는 지금 멤버
+    ({"type": "Group", "relations": [_member("m1")]}, {"m1": "Male"}, (None, None)),   # 멤버를 한 명만 적어 둔 팀일 수 있음
+    ({"type": "Group", "relations": [_member("m1", ended=True)]}, {}, (None, None)),
+    ({"type": "Character"}, {}, (None, None)),
+    ({}, {}, (None, None)),
+])
+def test_musicbrainz_lineup_gives_gender_and_composition_only_when_sure(sessions, artist, people, expected):
+    web = FakeWeb([("/robots.txt", 200, "")])
+    for mid in ("m1", "m2", "m3"):
+        web.add(f"artist/{mid}?fmt=json", {"id": mid, "type": "Person", **({"gender": people[mid]} if mid in people else {})})
+    assert musicbrainz.lineup(make_http(sessions, web), artist) == expected
 
 
 def test_musicbrainz_city_only_artist_is_checked_through_area(sessions):
