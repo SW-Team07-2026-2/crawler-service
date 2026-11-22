@@ -6,7 +6,7 @@ from sqlalchemy import select, update
 
 from crawler import db as dbm
 from crawler import runner
-from crawler.pipeline import Pipeline, to_concert
+from crawler.pipeline import Pipeline, fit_kopis_dates, to_concert
 
 from conftest import FakeLlm, FakeStudio, FakeWeb, make_http, settings
 from test_sources import KOPIS_DETAIL
@@ -372,8 +372,11 @@ def test_ticket_search_goes_soonest_first_and_carries_over_to_the_next_run(sessi
     w = web()
     w.add("pblprfr?service=KEY", "<dbs><db><mt20id>PF100</mt20id></db><db><mt20id>PF200</mt20id></db>"
                                  "<db><mt20id>PF300</mt20id></db></dbs>")
-    w.add("pblprfr/PF200?", KOPIS_DETAIL.replace("PF100", "PF200"))
-    w.add("pblprfr/PF300?", KOPIS_DETAIL.replace("PF100", "PF300"))
+    def dated(pf, day):   # KOPIS 기간을 그 공연 날짜로 — 원문 기간 밖 날짜는 크롤러가 고치므로
+        return KOPIS_DETAIL.replace("PF100", pf).replace("2026.12.12</prfpdfrom><prfpdto>2026.12.13", f"{day}</prfpdfrom><prfpdto>{day}")
+    w.add("pblprfr/PF100?", dated("PF100", "2027.03.01"))
+    w.add("pblprfr/PF200?", dated("PF200", "2026.12.01"))
+    w.add("pblprfr/PF300?", dated("PF300", "2020.01.01"))
     later = {**INDIE, "title": "늦은 공연", "startsAt": "2027-03-01T19:00:00+09:00"}
     sooner = {**INDIE, "title": "가까운 공연", "startsAt": "2026-12-01T19:00:00+09:00"}
     past = {**INDIE, "title": "지난 공연", "startsAt": "2020-01-01T19:00:00+09:00"}
@@ -687,3 +690,56 @@ def test_artist_without_genres_waits_until_genres_are_judged(sessions):
     assert [path for path, _ in studio2.posts] == [ARTISTS, ALBUMS]
     assert studio2.posts[0][1]["items"][0]["genres"] == ["INDIE_ROCK"]
     assert all(a["genres"] == ["INDIE_ROCK"] for a in studio2.posts[1][1]["items"])
+
+
+def test_concert_dates_outside_the_kopis_period_are_fixed_and_flagged_for_review():
+    """11/22 사뮈 투어: 포스터에 도시별 일정이 함께 있어 KOPIS(12/19 17:00) 대신 다른 회차(12/11 20:30)를 고름 → KOPIS 에 맞추고 '검수 필요'"""
+    detail = {"prfpdfrom": "2026.12.19", "prfpdto": "2026.12.19", "dtguidance": "토요일(17:00)"}
+    c = {"startsAt": "2026-12-11T20:30:00+09:00", "endsAt": "2026-12-11T22:30:00+09:00"}
+    notes = fit_kopis_dates(detail, c)
+    assert c == {"startsAt": "2026-12-19T17:00:00+09:00", "endsAt": "2026-12-19T19:00:00+09:00"}   # 길이 2시간은 그대로
+    assert notes[0].startswith("검수 필요 — 시작 2026-12-11 20:30 → 2026-12-19 17:00 · 끝 2026-12-11 22:30 → 2026-12-19 19:00")
+    assert fit_kopis_dates(detail, c) == []                                       # 고친 값은 다시 걸리지 않음
+
+    time_only = {"startsAt": "2026-11-27T20:00:00+09:00", "endsAt": "2026-11-27T22:00:00+09:00"}   # RAMPAGE FEST 전야제
+    assert fit_kopis_dates({"prfpdfrom": "2026.11.27", "prfpdto": "2026.11.27", "dtguidance": "금요일(20:30)"}, time_only)
+    assert time_only["startsAt"] == "2026-11-27T20:30:00+09:00"
+
+    run = {"startsAt": "2026-10-30T19:30:00+09:00", "endsAt": "2026-10-31T18:00:00+09:00"}   # 여러 날 · 시각 여럿 → 날짜만
+    assert fit_kopis_dates({"prfpdfrom": "2026.11.20", "prfpdto": "2026.11.21", "dtguidance": "금요일(19:30), 토요일(16:00)"}, run)
+    assert run == {"startsAt": "2026-11-20T19:30:00+09:00", "endsAt": "2026-11-21T18:00:00+09:00"}
+
+    odd = {"startsAt": "2026-11-28T14:00:00+09:00", "endsAt": "2026-11-29T16:00:00+09:00"}   # 신촌블루스 — 끝도 하루 밀려 있었음
+    assert fit_kopis_dates({"prfpdfrom": "2026.11.29", "prfpdto": "2026.11.29", "dtguidance": "일요일(14:00)"}, odd)
+    assert odd == {"startsAt": "2026-11-29T14:00:00+09:00", "endsAt": "2026-11-29T16:00:00+09:00"}
+
+    tour = {"startsAt": "2026-12-19T18:30:00+09:00", "endsAt": "2026-12-26T18:30:00+09:00"}   # 론 브랜튼 — 맞추면 끝 = 시작
+    notes = fit_kopis_dates({"prfpdfrom": "2026.12.25", "prfpdto": "2026.12.25", "dtguidance": "금요일(16:00,19:30)"}, tour)
+    assert tour == {"startsAt": "2026-12-25T18:30:00+09:00", "endsAt": None} and "끝 2026-12-26 18:30 → 비움" in notes[0]
+
+    fine = {"startsAt": "2026-12-12T18:00:00+09:00", "endsAt": None}
+    assert fit_kopis_dates({"prfpdfrom": "2026.12.12", "prfpdto": "2026.12.13", "dtguidance": "토요일(18:00), 일요일(17:00)"}, fine) == []
+    assert fit_kopis_dates({}, {"startsAt": None}) == []                           # 기준이 없으면 그대로
+
+
+def test_concerts_sent_before_the_date_check_are_fixed_without_asking_gemini_again(sessions):
+    """이미 정리해 보낸 공연(원문 그대로)도 다음 실행에서 날짜를 고쳐 다시 보냄 — Gemini 는 다시 부르지 않음"""
+    w = web()
+    wrong = {**INDIE, "startsAt": "2026-12-05T18:00:00+09:00", "endsAt": "2026-12-05T20:00:00+09:00"}
+    p = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=FakeLlm(concerts={"PF100": wrong, "PF200": MAINSTREAM}),
+                 studio=FakeStudio())
+    p.concerts()
+    with sessions() as s:                                                         # 검사 전 코드가 보낸 상태로 되돌림
+        item = s.scalar(select(dbm.Item).where(dbm.Item.key == "PF100"))
+        payload = json.loads(item.payload_json)
+        payload["concert"].update(startsAt=wrong["startsAt"], endsAt=wrong["endsAt"], reviewNotes=[])
+        item.payload_json, item.status, item.source_hash = json.dumps(payload, ensure_ascii=False), "SENT", "old"
+        s.commit()
+
+    llm = FakeLlm(concerts={})                                                  # 부르면 KeyError
+    p2 = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm, studio=FakeStudio())
+    p2.concerts()
+    assert p2.stats["concert_same_input"] == 2 and p2.stats["concert_dates_fixed"] == 1 and llm.calls == []
+    c = json.loads(items(sessions, "CONCERT")["PF100"].payload_json)["concert"]
+    assert c["startsAt"] == "2026-12-12T18:00:00+09:00" and c["reviewNotes"][0].startswith("검수 필요")
+    assert items(sessions, "CONCERT")["PF100"].status == "READY"                   # 다시 보냄
