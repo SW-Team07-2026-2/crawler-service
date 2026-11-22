@@ -104,7 +104,14 @@ class Pipeline:
                 if item is not None and item.input_hash == input_hash:
                     self.stats["concert_same_input"] += 1
                     if item.status != "SKIPPED":
-                        names += json.loads(item.payload_json)["concert"]["artistNames"]
+                        payload = json.loads(item.payload_json)
+                        notes = fit_kopis_dates(detail, payload["concert"])   # 이 검사 전에 정리한 것도 Gemini 없이 고침
+                        if notes:
+                            payload["concert"]["reviewNotes"] = notes
+                            self._upsert(s, "CONCERT", mt20id, payload, input_hash, origin=item.origin)
+                            s.commit()
+                            self.stats["concert_dates_fixed"] += 1
+                        names += payload["concert"]["artistNames"]
                     continue
             if getattr(self.llm, "exhausted", False):   # 하루 한도를 다 씀 · 서버가 계속 응답 못 함 — 이미지를 받지 않고 다음 실행에
                 self.stats[f"concert_llm_{getattr(self.llm, 'stop_reason', 'quota')}"] += 1
@@ -121,6 +128,8 @@ class Pipeline:
                 # 포스터 · 글로 팀을 하나도 확인하지 못했을 때만 MusicBrainz 멤버 관계로 (확인한 팀이 있으면 남은 이름은 대개 그 팀 멤버 · 세션)
                 c["artistNames"], c["unmatchedCast"] = self._teams_for(c["unmatchedCast"])
             concert = to_concert(detail, c, venue)
+            if concert["reviewNotes"]:
+                self.stats["concert_dates_fixed"] += 1
             payload = {"source": "kopis", "external_id": mt20id, "concert": concert}
             with self.sessions() as s:
                 self._upsert(s, "CONCERT", mt20id, payload, input_hash,
@@ -636,6 +645,7 @@ def to_concert(detail: dict, c: dict, venue: dict | None = None) -> dict:
         "artistNames": _unique(c.get("artistNames")),       # 같은 팀(표기만 다름)은 처음 것 하나
         "unmatchedCast": [n.strip() for n in c.get("unmatchedCast") or [] if n and n.strip()],   # 관리자 참고 (팀을 확인하지 못한 출연진)
         "bookingNotes": [n for n in c.get("bookingNotes") or [] if n],                          # 관리자 참고 (선예매 등)
+        "reviewNotes": [],                                   # 관리자 참고 — 크롤러가 고친 값 (비어 있지 않으면 검수 필요)
         "description": None,
         "terms": None, "requirements": None,
         # KOPIS 주소 그대로 — Studio 가 승인할 때 우리 버킷으로 옮김 (못 옮기면 관리자가 직접 올림)
@@ -643,8 +653,48 @@ def to_concert(detail: dict, c: dict, venue: dict | None = None) -> dict:
         "imageUrls": [u for u in detail.get("styurls") or [] if _kopis_image(u)][:MAX_IMAGE_URLS],
         "sourceUrl": link,
     }
+    concert["reviewNotes"] = fit_kopis_dates(detail, concert)
     concert["description"] = _description(detail, c, venue, concert)
     return concert
+
+
+def fit_kopis_dates(detail: dict, concert: dict) -> list[str]:
+    """시작 · 끝을 KOPIS 원문에 맞춤 — 시작 날짜는 공연 기간(prfpdfrom~prfpdto) 안, 시간 안내(dtguidance)의 시각이 하나뿐이면 그 시각.
+    고쳤으면 concert 를 바꾸고 관리자용 '검수 필요' 글을 돌려줌. 11/22 투어 포스터의 다른 회차 날짜 · 시각을 고른 7건 (사뮈 12/19 → 12/11 등)"""
+    try:
+        first = datetime.strptime(detail.get("prfpdfrom") or "", "%Y.%m.%d").date()
+        last = datetime.strptime(detail.get("prfpdto") or "", "%Y.%m.%d").date()
+        starts = datetime.fromisoformat(concert["startsAt"])
+    except (TypeError, ValueError):
+        return []                                      # 원문 기간이나 시작이 없으면 맞출 기준이 없음
+    fixed = starts
+    if not first <= fixed.date() <= last:
+        fixed = fixed.replace(year=first.year, month=first.month, day=first.day)
+    times = set(re.findall(r"\b(\d{1,2}):(\d{2})\b", detail.get("dtguidance") or ""))
+    if len(times) == 1:
+        h, m = map(int, times.pop())
+        fixed = fixed.replace(hour=h, minute=m)
+    if fixed == starts:
+        return []
+    note = f"검수 필요 — 시작 {starts:%Y-%m-%d %H:%M} → {fixed:%Y-%m-%d %H:%M}"
+    concert["startsAt"] = fixed.isoformat()
+    if concert.get("endsAt"):
+        ends = datetime.fromisoformat(concert["endsAt"])
+        if first == last:   # 하루 공연 — 길이는 그대로, 길이가 이상하면(하루 이상 · 0 이하) 끝 날짜만 공연 날짜로 (신촌블루스 11/28~11/29)
+            span = ends - starts
+            new_end = fixed + span if timedelta(0) < span < timedelta(days=1) else ends.replace(year=first.year, month=first.month, day=first.day)
+        elif not first <= ends.date() <= last:
+            new_end = ends.replace(year=last.year, month=last.month, day=last.day)
+        else:
+            new_end = ends
+        if new_end <= fixed:                               # 맞출 수 없으면 비움 — 관리자가 넣음 (론 브랜튼 12/19~12/26 → 하루 공연)
+            concert["endsAt"] = None
+            note += f" · 끝 {ends:%Y-%m-%d %H:%M} → 비움"
+        elif new_end != ends:
+            concert["endsAt"] = new_end.isoformat()
+            note += f" · 끝 {ends:%Y-%m-%d %H:%M} → {new_end:%Y-%m-%d %H:%M}"
+    period = " ~ ".join(dict.fromkeys(x for x in (detail.get("prfpdfrom"), detail.get("prfpdto")) if x))
+    return [f"{note} (KOPIS 기간 {period} · 시간 안내 {detail.get('dtguidance') or '없음'} 에 맞춰 크롤러가 고침)"]
 
 
 def _opt(v):
