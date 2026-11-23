@@ -9,7 +9,7 @@ from sqlalchemy import select
 from . import db as dbm
 from .keys import norm
 from .pipeline import Pipeline
-from .webtools import DAILY_SEARCHES, RUN_BUDGET
+from .webtools import MONTHLY_SEARCHES, RUN_BUDGET, SEARCH_RESERVE
 
 log = logging.getLogger(__name__)
 STALE = timedelta(hours=6)          # 이보다 오래된 RUNNING 은 죽은 실행으로 봄
@@ -49,7 +49,7 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
         def artists():
             new = _new_names(sessions, found)
             pipeline.stats["artist_new_names"] = len(new)   # 0 이면 더 찾을 새 이름이 없음 (연달아 돌릴 때 멈추는 기준)
-            pipeline.artists(seeds + new)
+            pipeline.artists(pipeline.retry_names() + seeds + new)   # 지난번에 찾다가 실패한 이름 먼저 (11/23 아웃박스)
         stage("아티스트", artists)
         stage("다시 보기", pipeline.refresh_known)                # 시드 · 공연에 없는, 전에 찾은 아티스트의 신보
         if concerts_failed:   # 한 번 더 — 11/22 KOPIS 차단이 몇 분 이어져 공연만 실패 · 아티스트 단계(1~3시간) 뒤엔 풀려 있을 때가 많음
@@ -57,6 +57,7 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
             pipeline.stats["concert_stage_retry"] += 1
             if stage("공연 다시", pipeline.concerts) is None:
                 errors.insert(0, first)
+    stage("다시 하기", lambda: pipeline.retry(names=kind == "dawn"))   # 못 끝낸 이름 · 공연을 한 번 더 — 남으면 다음 실행 맨 앞에
     stage("전송", pipeline.send)
     status = "FAILED" if errors else "DONE"
     error = " | ".join(errors)[:2000] or None
@@ -91,14 +92,22 @@ def _new_names(sessions, names: list[str]) -> list[str]:
     return out
 
 
-def search_budget(sessions) -> int:
-    """이번 실행에 쓸 검색 크레딧 — 오늘(한국 시간) 앞선 실행이 쓴 만큼 빼고, 실행당 RUN_BUDGET 을 넘지 않음"""
-    midnight = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
-    since = midnight.astimezone(timezone.utc).replace(tzinfo=None)        # crawl_run 시각은 UTC
+def search_budget(sessions, now: datetime | None = None) -> int:
+    """이번 실행에 쓸 검색 크레딧 — 이번 달 남은 크레딧(예비 몫 빼고)을 남은 날수로 나눈 것이 하루 몫 (한국 시간).
+    오늘 앞선 실행이 쓴 만큼 빼고, 실행당 RUN_BUDGET 까지. 덜 쓴 날이 있으면 남은 날의 몫이 늘어납니다."""
+    day = (now or datetime.now(KST)).replace(hour=0, minute=0, second=0, microsecond=0)
+    month = day.replace(day=1)
+    days_left = ((month + timedelta(days=32)).replace(day=1) - day).days     # 오늘 포함
+    used_month, used_today = _searches_since(sessions, month), _searches_since(sessions, day)
+    daily = (MONTHLY_SEARCHES - SEARCH_RESERVE - (used_month - used_today)) // days_left
+    return max(0, min(RUN_BUDGET, daily - used_today))
+
+
+def _searches_since(sessions, when: datetime) -> int:
+    since = when.astimezone(timezone.utc).replace(tzinfo=None)              # crawl_run 시각은 UTC
     with sessions() as s:
         rows = s.scalars(select(dbm.CrawlRun.stats_json).where(dbm.CrawlRun.started_at >= since)).all()
-    used = sum(json.loads(r).get("web_search_requests", 0) for r in rows if r)
-    return max(0, min(RUN_BUDGET, DAILY_SEARCHES - used))
+    return sum(json.loads(r).get("web_search_requests", 0) for r in rows if r)
 
 
 def read_seeds(path) -> list[str]:

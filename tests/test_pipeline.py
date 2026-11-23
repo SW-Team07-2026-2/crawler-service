@@ -207,23 +207,112 @@ def test_missed_names_step_aside_for_30_days_so_later_names_get_their_turn(sessi
     assert runner._new_names(sessions, ["없는팀", "이지민", "실리카겔"]) == ["없는팀"]     # 30일이 지나면 다시 찾음
 
 
-def test_search_budget_is_shared_by_all_runs_of_the_day(sessions):
-    """11/23 연달아 돌리기 — 검색 한도는 실행마다가 아니라 하루(한국 시간) 30 (Tavily 무료 월 1,000)"""
-    assert runner.search_budget(sessions) == 20                         # 오늘 첫 실행 — 실행당 20
-    midnight = datetime.now(runner.KST).replace(hour=0, minute=0, second=0, microsecond=0)
+class Flaky:
+    """처음 fails 번은 part 가 든 주소에 500 — 그다음부터는 web 그대로 (외부 서버가 잠깐 안 되는 경우)"""
+
+    def __init__(self, web, part, fails=1):
+        self.web, self.part, self.left = web, part, fails
+
+    def __call__(self, url, headers):
+        if self.part in url and self.left > 0:
+            self.left -= 1
+            self.web.calls.append(url)
+            return 500, "boom"
+        return self.web(url, headers)
+
+
+HYUKOH = [(quote("혁오"), {"artists": [{"id": "hy", "name": "혁오", "score": 100, "country": "KR", "aliases": []}]}),
+          ("artist/hy?", {"id": "hy", "name": "혁오", "aliases": []}),
+          ("release-group?artist=hy", {"release-groups": [{"id": "rgH", "title": "22", "primary-type": "EP",
+                                                          "first-release-date": "2014-05-29"}]}),
+          ("release?release-group=rgH", {"releases": [{"date": "2014-05-29", "media": [{"tracks": [{"title": "Hooka"}]}]}]})]
+
+
+def retries(sessions):
+    with sessions() as s:
+        return {(r.kind, r.key): r.tries for r in s.scalars(select(dbm.Retry))}
+
+
+def test_name_that_failed_on_a_server_error_is_tried_again_at_the_end_of_the_run(sessions):
+    """11/23 아웃박스 — MusicBrainz 가 잠깐 오류면 못 찾음(miss)으로 두지 않고 같은 실행 끝에 한 번 더"""
+    w = web()
+    for part, body in HYUKOH:
+        w.add(part, body)
+    p = Pipeline(sessions, make_http(sessions, Flaky(w, quote("혁오"))), settings(kopis_key="KEY"),
+                 llm=FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM}), studio=FakeStudio())
+    out = runner.run("dawn", sessions, p, ["혁오"])
+    assert out["stats"]["artist_error"] == 1 and out["stats"]["retry_name_queued"] == 1 and out["stats"]["retry_name_done"] == 1
+    assert "혁오" in {json.loads(i.payload_json)["name"] for i in items(sessions, "ARTIST").values()}
+    assert retries(sessions) == {} and out["stats"]["retry_left"] == 0
+    with sessions() as s:
+        assert s.scalar(select(dbm.ArtistMiss)) is None                 # 오류는 못 찾음이 아님 (30일 건너뛰지 않음)
+
+
+def test_name_still_failing_is_kept_and_looked_up_first_in_the_next_run(sessions):
+    w = web()
+    w.add(quote("혁오"), "boom", status=500)
+    p = pipeline(sessions, w, FakeStudio())
+    p.artists(["혁오"])
+    assert retries(sessions) == {("NAME", "혁오"): 1}
+
+    for part, body in HYUKOH:                                           # 다음 실행 — 서버가 돌아옴
+        w.add(part, body)
+    w.calls.clear()
+    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio()), [])
+    searches = [u for u in w.calls if "artist?query=" in u]
+    assert quote("혁오") in searches[0]                                 # 공연 출연진(실리카겔)보다 먼저
+    assert retries(sessions) == {}
+
+
+def test_concert_whose_cast_lookup_failed_is_cleaned_up_again_even_if_the_source_is_the_same(sessions):
+    """원문이 같으면 다시 정리하지 않는데, 출연진 → 팀 조회가 실패한 공연은 영영 다시 안 보던 것 (11/23)"""
+    w = web()
+    for person, pid in [("박솔", "p1"), ("강경태", "p2")]:
+        w.add(quote(person), {"artists": [{"id": pid, "name": person, "score": 100, "country": "KR", "aliases": []}]})
+        w.add(f"artist/{pid}?inc=artist-rels", {"relations": [{"type": "member of band", "direction": "forward", "artist": {"name": "Band A"}}]})
+    llm = FakeLlm(concerts={"PF100": {**INDIE, "artistNames": [], "unmatchedCast": ["박솔", "강경태"]}, "PF200": MAINSTREAM})
+    flaky = Flaky(w, "artist/p1?inc=artist-rels", fails=2)                  # 실행 안에서 두 번(처음 · 실행 끝) 다 실패
+    runner.run("lunch", sessions, Pipeline(sessions, make_http(sessions, flaky), settings(kopis_key="KEY"), llm=llm,
+                                           studio=FakeStudio()), [])
+    assert retries(sessions) == {("CONCERT", "PF100"): 2}
+    assert json.loads(items(sessions, "CONCERT")["PF100"].payload_json)["concert"]["artistNames"] == ["Band A"]   # 강경태만으로
+
+    studio = FakeStudio()
+    runner.run("lunch", sessions, pipeline(sessions, w, studio, llm), [])   # 원문 그대로 · 조회는 이제 됨
+    assert llm.calls.count("concert:PF100") == 3                          # 첫 실행 2번(처음 · 끝) + 다음 실행 1번
+    assert retries(sessions) == {}
+
+
+def test_concert_skipped_by_the_gemini_daily_limit_waits_without_counting_as_a_failure(sessions):
+    class Exhausted(FakeLlm):
+        exhausted, stop_reason = True, "quota"
+    runner.run("lunch", sessions, pipeline(sessions, web(), FakeStudio(), Exhausted()), [])
+    assert retries(sessions) == {("CONCERT", "PF100"): 0, ("CONCERT", "PF200"): 0}   # 한도 탓 — 실패로 세지 않음
+    llm = FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM})
+    runner.run("lunch", sessions, pipeline(sessions, web(), FakeStudio(), llm), [])
+    assert sorted(llm.calls) == ["concert:PF100", "concert:PF200"] and retries(sessions) == {}
+
+
+def test_search_budget_spreads_the_month_over_the_days_left(sessions):
+    """11/23 검색 한도 — 이번 달 남은 크레딧(1,000 - 예비 100 - 쓴 것)을 남은 날수로 나눈 것이 하루 몫 · 실행 횟수와 무관"""
+    now = datetime(2026, 11, 23, 13, 0, tzinfo=runner.KST)                 # 11/23 ~ 11/30 = 8일
     utc = lambda d: d.astimezone(runner.timezone.utc).replace(tzinfo=None)
-    with sessions() as s:
-        s.add(dbm.CrawlRun(kind="dawn", status="DONE", started_at=utc(midnight - timedelta(minutes=1)),
-                           stats_json=json.dumps({"web_search_requests": 20})))          # 어제 — 세지 않음
-        s.add(dbm.CrawlRun(kind="dawn", status="DONE", started_at=utc(midnight + timedelta(hours=3)),
-                           stats_json=json.dumps({"web_search_requests": 20})))
-        s.commit()
-    assert runner.search_budget(sessions) == 10
-    with sessions() as s:
-        s.add(dbm.CrawlRun(kind="dawn", status="DONE", started_at=utc(midnight + timedelta(hours=4)),
-                           stats_json=json.dumps({"web_search_requests": 15})))
-        s.commit()
-    assert runner.search_budget(sessions) == 0
+
+    def run(when, n):
+        with sessions() as s:
+            s.add(dbm.CrawlRun(kind="dawn", status="DONE", started_at=utc(when), stats_json=json.dumps({"web_search_requests": n})))
+            s.commit()
+
+    assert runner.search_budget(sessions, now) == 40                     # 900 // 8 = 112 → 실행당 40
+    run(datetime(2026, 10, 31, 12, 0, tzinfo=runner.KST), 500)            # 지난달 — 세지 않음
+    run(datetime(2026, 11, 20, 3, 30, tzinfo=runner.KST), 143)            # 이번 달 앞선 날 → 하루 (900 - 143) // 8 = 94
+    run(datetime(2026, 11, 23, 3, 30, tzinfo=runner.KST), 40)
+    assert runner.search_budget(sessions, now) == 40                     # 오늘 남은 54 → 실행당 40
+    run(datetime(2026, 11, 23, 11, 0, tzinfo=runner.KST), 40)
+    assert runner.search_budget(sessions, now) == 14                     # 94 - 80
+    run(datetime(2026, 11, 23, 12, 0, tzinfo=runner.KST), 14)
+    assert runner.search_budget(sessions, now) == 0
+    assert runner.search_budget(sessions, datetime(2026, 11, 24, 3, 30, tzinfo=runner.KST)) == 40   # 다음 날 (900-237)//7 = 94
 
 
 def test_discogs_only_through_musicbrainz_link(sessions):
@@ -378,7 +467,7 @@ def test_member_names_become_a_team_only_when_musicbrainz_agrees(sessions):
             {"type": "member of band", "direction": "forward", "artist": {"name": b}} for b in bands]})
     p = pipeline(sessions, w, FakeStudio())
     # 박솔 · 강경태 → 둘 다 Band A (한 번만) · 권오경 → 팀이 둘이라 애매 → 남김 · 김없음 → MusicBrainz 에 없음 → 남김
-    assert p._teams_for(["박솔", "강경태", "권오경", "김없음"]) == (["Band A"], ["권오경", "김없음"])
+    assert p._teams_for(["박솔", "강경태", "권오경", "김없음"]) == (["Band A"], ["권오경", "김없음"], True)   # 김없음 조회 404 = 실패
 
 
 
@@ -719,7 +808,9 @@ def test_kopis_down_stops_the_concert_loop_after_five_misses_in_a_row(sessions):
     for i in ids:
         w.add(f"pblprfr/{i}?", "", status=500)
     out = runner.run("dawn", sessions, pipeline(sessions, w, studio), ["검정치마"])
-    assert out["stats"]["concert_fetch_error"] == 5 and out["stats"]["concert_kopis_down"] == 1
+    # 실행 끝 다시 하기(11/23)에서 못 받은 5건부터 한 번 더 → 또 5번 실패 → 멈춤 · 5건은 다음 실행 맨 앞에
+    assert out["stats"]["concert_fetch_error"] == 10 and out["stats"]["concert_kopis_down"] == 2
+    assert out["stats"]["retry_left"] == 5
     assert not any("pblprfr/PF600" in u or "pblprfr/PF700" in u for u in w.calls)
     assert out["status"] == "DONE" and [path for path, _ in studio.posts] == [ARTISTS, ALBUMS]
 

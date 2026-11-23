@@ -1,3 +1,4 @@
+import copy
 import json
 from types import SimpleNamespace
 
@@ -70,7 +71,7 @@ class FakeLlm:
         mt20id = facts["detail"]["mt20id"]
         self.calls.append(f"concert:{mt20id}")
         self.facts[mt20id], self.images[mt20id] = facts, len(images or [])
-        return self.concerts[mt20id]
+        return copy.deepcopy(self.concerts[mt20id])     # 실제 Gemini 처럼 부를 때마다 새 결과 (파이프라인이 고쳐 써도 다음 호출에 안 남게)
 
     def artist_genres(self, name, aliases, albums, label):
         self.calls.append(f"artist:{name}")
