@@ -263,11 +263,18 @@ class Pipeline:
                 if mb is None:
                     self.stats["artist_not_found"] += 1   # 동명이인 · 표기 차이로 애매하면 만들지 않음
                     log.info("crawl_artist_not_found name=%s", name)
+                    self._miss(name.strip(), "not_found")
                     continue
                 if mb["mbid"] not in self._loaded:       # 다른 이름(한글 · 영어)으로 이미 본 아티스트
                     self._load(mb, name.strip())
             except Exception as e:
                 self._fail("artist", name, e)
+
+    def _miss(self, name: str, reason: str):
+        """만들지 못한 이름을 남겨 30일 동안 새 이름 칸에서 뺌 (runner._new_names)"""
+        with self.sessions() as s:
+            dbm.remember_miss(s, name, reason)
+            s.commit()
 
     def refresh_known(self):
         """전에 찾은 아티스트를 MusicBrainz id 로 다시 봄 — 시드에 없고 공연에 다시 안 나와도 신보 · 바뀐 값이 들어옵니다.
@@ -291,6 +298,8 @@ class Pipeline:
             # 앨범이 하나도 없으면 만들지 않음 — 작사가 · 배우처럼 별칭만 같은 사람이 걸리는 것을 막음 (11/18 이지민 → 이하진)
             self.stats["artist_no_releases"] += 1
             log.info("crawl_artist_no_releases name=%s mbid=%s", asked or mb["name"], mb["mbid"])
+            if asked:
+                self._miss(asked, "no_releases")
             return
         names = [n for n in dict.fromkeys([mb["name"], *mb["aliases"], asked]) if n]
         with self.sessions() as s:

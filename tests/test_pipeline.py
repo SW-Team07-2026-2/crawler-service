@@ -185,6 +185,28 @@ def test_alias_only_person_without_releases_is_not_created(sessions):
         assert dbm.lookup_artist_key(s, "이지민") is None              # 다음에 다시 찾을 수 있게 연결도 남기지 않음
 
 
+def test_missed_names_step_aside_for_30_days_so_later_names_get_their_turn(sessions, monkeypatch):
+    """11/23 실측: 새 이름 칸(50)을 매번 같은 실패 이름 50개가 차지해 뒤의 483개를 한 번도 못 보고 39팀에서 멈췄음"""
+    w = web()
+    w.add(quote("없는팀"), {"artists": []})
+    w.add(quote("이지민"), {"artists": [{"id": "lj", "name": "이하진", "score": 100, "country": "KR",
+                                         "aliases": [{"name": "이지민"}]}]})
+    w.add("artist/lj?", {"id": "lj", "name": "이하진", "aliases": [{"name": "이지민"}]})
+    w.add("release-group?artist=lj", {"release-groups": []})
+    p = pipeline(sessions, w, FakeStudio())
+    p.artists(["없는팀", "이지민"])
+    assert p.stats["artist_not_found"] == 1 and p.stats["artist_no_releases"] == 1
+
+    monkeypatch.setattr(runner, "MAX_NEW_ARTISTS", 1)
+    assert runner._new_names(sessions, ["없는팀", "이지민", "실리카겔"]) == ["실리카겔"]   # 칸이 하나여도 안 본 이름 차례
+
+    with sessions() as s:
+        s.execute(update(dbm.ArtistMiss).where(dbm.ArtistMiss.name == "없는팀")
+                  .values(checked_at=dbm.now() - timedelta(days=31)))
+        s.commit()
+    assert runner._new_names(sessions, ["없는팀", "이지민", "실리카겔"]) == ["없는팀"]     # 30일이 지나면 다시 찾음
+
+
 def test_discogs_only_through_musicbrainz_link(sessions):
     w = web()
     w.add("artist/bs?", {"id": "bs", "name": "검정치마", "aliases": [],

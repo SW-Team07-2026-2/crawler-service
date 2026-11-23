@@ -88,6 +88,18 @@ class ArtistLink(Base):
     key: Mapped[str] = mapped_column(String(64))
 
 
+class ArtistMiss(Base):
+    """MusicBrainz 에서 아티스트로 만들지 못한 이름 (11/23) — 30일 동안 다시 찾지 않습니다 (runner.MISS_RETRY).
+    못 찾은 이름이 새 이름 칸을 매번 먼저 차지해 뒤의 이름을 한 번도 못 봤음 (11/20~23 아티스트 39팀에서 멈춤).
+    MusicBrainz 검색도 30일 캐시라 그 안에 다시 찾아도 같은 답입니다."""
+    __tablename__ = "artist_miss"
+    id: Mapped[int] = mapped_column(Id, primary_key=True, autoincrement=True)
+    name_norm: Mapped[str] = mapped_column(String(200), unique=True)
+    name: Mapped[str] = mapped_column(String(200))
+    reason: Mapped[str] = mapped_column(String(16))               # not_found · no_releases
+    checked_at: Mapped[datetime] = mapped_column(DateTime)
+
+
 class AlbumLink(Base):
     """앨범 대표 키 — 웹 검색 · 인디스트릿에서 먼저 찾은 앨범을 나중에 MusicBrainz 에 생긴 같은 앨범과 하나로 (Studio 후보가 둘이 되지 않게).
     site: musicbrainz(id=release group id) · title(id=아티스트 키:종류:정규화한 제목)"""
@@ -142,6 +154,17 @@ def artist_key_for(db: Session, name: str, links: dict[str, str], aliases: list[
 
 def lookup_artist_key(db: Session, name: str) -> str | None:
     return db.scalar(select(ArtistLink.key).where(ArtistLink.site == "name", ArtistLink.site_id == norm(name)))
+
+
+def remember_miss(db: Session, name: str, reason: str):
+    n = norm(name)[:200]
+    if not n:
+        return
+    row = db.scalar(select(ArtistMiss).where(ArtistMiss.name_norm == n))
+    if row is None:
+        db.add(ArtistMiss(name_norm=n, name=name[:200], reason=reason, checked_at=now()))
+    else:
+        row.name, row.reason, row.checked_at = name[:200], reason, now()
 
 
 def album_key_for(db: Session, artist_key: str, type_: str, title: str, rgid: str | None = None) -> str:
