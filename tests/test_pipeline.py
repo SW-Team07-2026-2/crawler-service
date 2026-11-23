@@ -7,6 +7,7 @@ from sqlalchemy import select, update
 from crawler import db as dbm
 from crawler import runner
 from crawler.pipeline import Pipeline, fit_kopis_dates, to_concert
+from crawler.webtools import SearchQuota
 
 from conftest import FakeLlm, FakeStudio, FakeWeb, make_http, settings
 from test_sources import KOPIS_DETAIL
@@ -142,6 +143,36 @@ def test_english_name_goes_as_the_korean_name_and_artists_judged_before_are_aske
     runner.run("dawn", sessions, pipeline(sessions, w, studio, NoQuota({"PF100": INDIE, "PF200": MAINSTREAM})), ["검정치마"])
     assert studio.posts == []                                        # 영어 이름으로 되돌아가지 않음
     assert {json.loads(i.payload_json)["name"] for i in items(sessions, "ARTIST").values()} == {"검정치마", "실리카겔"}
+
+
+def test_english_name_without_a_hangul_alias_is_looked_up_once_in_web_search(sessions):
+    """11/24 한글 별칭이 없는 영어 이름만 검색 1번 (조각을 Gemini 에 근거로) — 한글 이름(검정치마) · 한글 별칭이 있는 팀은 검색 안 함.
+    검색 한도면 장르와 함께 다음 실행에 (영어 이름으로 보내지 않음)"""
+    def english_only(w):
+        w.add("artist/sg?", {"id": "sg", "name": "Silica Gel", "aliases": [{"name": "Silica Gel"}]})
+        return w
+
+    genres = {"검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC"]}
+    w = english_only(web())
+    quota = FakeSearcher(mentions="quota")
+    studio = FakeStudio()
+    llm = FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres, names={"Silica Gel": "실리카겔"})
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm,
+                                                studio=studio, searcher=quota), ["검정치마"])
+    assert ("mentions", "Silica Gel") in quota.calls and ("mentions", "검정치마") not in quota.calls
+    assert "artist:Silica Gel" not in llm.calls and out["stats"]["artist_name_search_deferred"] == 1
+    assert {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()} == {
+        "검정치마": "SENT", "Silica Gel": "HOLD"}                       # 장르 · 이름을 못 정해 기다림
+    assert [i["name"] for path, body in studio.posts if path == ARTISTS for i in body["items"]] == ["검정치마"]
+
+    found = FakeSearcher(mentions={"Silica Gel": ["실리카겔 (Silica Gel) | 밴드 실리카겔의 정규 2집"]})
+    studio = FakeStudio()
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, english_only(w)), settings(kopis_key="KEY"),
+                                                llm=llm, studio=studio, searcher=found), ["검정치마"])
+    assert [c for c in found.calls if c[0] == "mentions"] == [("mentions", "Silica Gel")]
+    assert llm.web["Silica Gel"] == ["실리카겔 (Silica Gel) | 밴드 실리카겔의 정규 2집"] and llm.web["검정치마"] == []
+    assert [i["name"] for path, body in studio.posts if path == ARTISTS for i in body["items"]] == ["실리카겔"]
+    assert out["stats"]["artist_name_search"] == 1
 
 
 def test_known_artist_is_refreshed_without_seed_or_concert_and_genres_stay(sessions):
@@ -608,8 +639,14 @@ STORE_URL = "https://store.example/silica-tee"
 
 
 class FakeSearcher:
-    def __init__(self, releases=None, goods=None):
-        self.r, self.g, self.calls = releases or {}, goods or {}, []
+    def __init__(self, releases=None, goods=None, mentions=None):
+        self.r, self.g, self.m, self.calls = releases or {}, goods or {}, mentions or {}, []
+
+    def mentions(self, name):
+        self.calls.append(("mentions", name))
+        if self.m == "quota":
+            raise SearchQuota("budget")
+        return self.m.get(name, [])
 
     def releases(self, artist):
         self.calls.append(("releases", artist["name"]))
@@ -868,7 +905,7 @@ def test_artist_without_genres_waits_until_genres_are_judged(sessions):
     from crawler.llm import LlmSkip
 
     class NoQuota(FakeLlm):
-        def artist_info(self, name, aliases, albums, label, legal_names=()):
+        def artist_info(self, name, aliases, albums, label, legal_names=(), web=()):
             raise LlmSkip("quota")
 
     w, studio = web(), FakeStudio()

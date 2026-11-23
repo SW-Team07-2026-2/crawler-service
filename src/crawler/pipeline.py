@@ -26,10 +26,11 @@ from sqlalchemy import delete, select
 from . import db as dbm
 from . import images as imgs
 from .enums import ARTIST_COMPOSITIONS, ARTIST_GENDERS
-from .keys import LATIN, content_hash, norm
+from .keys import HANGUL, LATIN, content_hash, norm
 from .llm import LlmSkip
 from .sources import discogs, gimbab, indistreet, kopis, musicbrainz
 from .studio import StudioRejected
+from .webtools import SearchQuota
 
 log = logging.getLogger(__name__)
 
@@ -573,8 +574,23 @@ class Pipeline:
         return out
 
     def _ask(self, mb: dict, source: dict) -> dict | None:
+        legal = mb.get("legal_names", [])
+        web = []
+        # 11/24 영어 이름인데 쓸 수 있는 한글 별칭이 없으면 한글 표기를 웹 검색 조각에서 찾음 — 근거 없이 물으면 지어냄 (llm.artist_info)
+        # 본명은 본명으로 활동할 때만 씀 (MusicBrainz 이름이 본명 — Moon Sujin → 문수진)
+        usable = [a for a in mb["aliases"] if HANGUL.search(a) and (a not in legal or mb["name"] in legal)]
+        if self.searcher is not None and not getattr(self.llm, "exhausted", False) and LATIN.search(mb["name"]) and not usable:
+            try:
+                web = self.searcher.mentions(mb["name"])
+                self.stats["artist_name_search"] += 1
+            except SearchQuota:
+                self.stats["artist_name_search_deferred"] += 1     # 검색 한도 — 장르와 함께 다음 실행에 (None)
+                return None
+            except Exception as e:
+                self._fail("artist_name_search", mb["mbid"], e)
+                return None
         try:
-            return self.llm.artist_info(mb["name"], mb["aliases"], source["albums"], source["label"], mb.get("legal_names", []))
+            return self.llm.artist_info(mb["name"], mb["aliases"], source["albums"], source["label"], legal, web)
         except LlmSkip as e:
             self.stats[f"artist_llm_{e}"] += 1
             return None

@@ -63,6 +63,7 @@ class FakeLlm:
         self.concerts = concerts or {}      # mt20id → 결과
         self.genres = genres or {}          # 이름 → 장르
         self.names = names or {}            # 이름 → 한글 활동명
+        self.web: dict[str, list[str]] = {} # 이름 → 한글 이름 근거로 넘긴 웹 검색 조각
         self.calls: list[str] = []
         self.facts: dict[str, dict] = {}    # mt20id → Haiku 에 넘긴 값
         self.images: dict[str, int] = {}    # mt20id → 이미지 조각 수
@@ -74,8 +75,9 @@ class FakeLlm:
         self.facts[mt20id], self.images[mt20id] = facts, len(images or [])
         return copy.deepcopy(self.concerts[mt20id])     # 실제 Gemini 처럼 부를 때마다 새 결과 (파이프라인이 고쳐 써도 다음 호출에 안 남게)
 
-    def artist_info(self, name, aliases, albums, label, legal_names=()):
+    def artist_info(self, name, aliases, albums, label, legal_names=(), web=()):
         self.calls.append(f"artist:{name}")
+        self.web[name] = list(web)
         return {"genres": self.genres.get(name, []), "korean_name": self.names.get(name)}
 
 

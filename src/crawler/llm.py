@@ -65,8 +65,10 @@ ARTIST_SYSTEM = """한국 인디 아티스트의 장르와 한글 활동명을 �
 - genres: 정해진 목록에서 최대 3개, 대표적인 것부터. 이 아티스트를 확실히 알지 못하면 빈 배열 — 이름만 보고 짐작하지 않습니다.
   앨범 제목 · 레이블은 같은 이름의 다른 아티스트와 구분하는 참고용입니다.
 - koreanName: 한국 음원 사이트 · 공연 소개에서 이 아티스트를 부르는 한글 활동명 (예: SE SO NEON → 새소년, ADOY → 아도이, 10cm → 십센치).
-  별칭(aliases)에 그 표기가 있으면 그대로 씁니다. 본명(legalNames) · 예전 이름 · 다른 프로젝트 이름은 쓰지 않습니다.
-  널리 쓰이는 한글 표기를 확실히 알지 못하면 "" — 영어 이름을 직접 한글로 옮겨 만들지 않습니다.
+  별칭(aliases)이나 웹 검색 결과(webResults)에 이 아티스트의 한글 표기로 적힌 것 중에서만 고릅니다. 없으면 "" — 영어 이름을 직접 한글로 옮겨 만들지 않습니다.
+  본명(legalNames · 검색 결과의 '본명') · 예전 이름 · 다른 프로젝트 이름 · 읽는 법 풀이(Royal 44 → 로얄 포티 포)는 쓰지 않습니다.
+  다만 본명으로 활동하면(name 이 legalNames 에 있음 — Moon Sujin → 문수진) 한글 본명이 활동명입니다.
+  검색 결과에는 같은 이름의 다른 사람이나 함께 적힌 다른 아티스트도 나옵니다 — 앨범 · 레이블로 이 아티스트를 가리키는 표기인지 확인합니다.
 결과는 관리자가 확인한 뒤 서비스에 들어갑니다."""
 
 CONCERT_SYSTEM = """KOPIS 공연 상세(JSON)와 그 공연의 포스터 · 소개 이미지를 indig 공연 후보로 정리합니다. indig 는 한국 인디 음악(밴드 · 싱어송라이터 · 인디 레이블) 플랫폼이고, 결과는 관리자가 확인한 뒤 등록됩니다.
@@ -189,10 +191,14 @@ class Llm:
         self.output_tokens += (u.candidates_token_count or 0) + (u.thoughts_token_count or 0)
 
     def artist_info(self, name: str, aliases: list[str], albums: list[str], label: str | None,
-                    legal_names: list[str] = ()) -> dict:
-        """{genres, korean_name} — 한글 활동명은 한글이 들어 있고 본명이 아닐 때만 (아니면 None)"""
-        content = json.dumps({"name": name, "aliases": aliases, "legalNames": list(legal_names), "albums": albums[:15],
-                              "label": label}, ensure_ascii=False)
+                    legal_names: list[str] = (), web: list[str] = ()) -> dict:
+        """{genres, korean_name} — 한글 활동명은 근거에 있을 때만 (아니면 None): 한글이 들어 있고 본명이 아니며(본명으로 활동하면 본명도),
+        별칭 중 하나이거나 웹 검색 결과 한 건(제목 · 본문 조각)에 영어 이름과 함께 보여야 함
+        (11/24 근거 없이 물으니 Royal 44 → '로열포티포' 를 지어냄 · 실제 표기는 로얄44)"""
+        payload = {"name": name, "aliases": aliases, "legalNames": list(legal_names), "albums": albums[:15], "label": label}
+        if web:
+            payload["webResults"] = list(web)
+        content = json.dumps(payload, ensure_ascii=False)
         result = self.extract(ARTIST_SYSTEM, content, ARTIST_SCHEMA)
         genres = []
         for g in result["genres"]:            # 대소문자는 보장되지 않음 (structured outputs 안내)
@@ -200,7 +206,12 @@ class Llm:
             if g in GENRES and g not in genres:
                 genres.append(g)
         korean = (result.get("koreanName") or "").strip()[:100]
-        if not HANGUL.search(korean) or norm(korean) in {norm(n) for n in legal_names}:
+        k = norm(korean)
+        legal = {norm(n) for n in legal_names}
+        if norm(name) in legal:
+            legal = set()                     # 본명으로 활동 (Moon Sujin → 문수진)
+        seen = k in {norm(a) for a in aliases} or any(k in norm(w) and norm(name) in norm(w) for w in web)
+        if not HANGUL.search(korean) or k in legal or not seen:
             korean = None
         return {"genres": genres[:3], "korean_name": korean}
 

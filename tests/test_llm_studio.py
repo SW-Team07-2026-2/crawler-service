@@ -47,13 +47,31 @@ def test_artist_info_request_and_cleanup():
 
 def test_artist_korean_name_is_kept_only_when_it_is_hangul_and_not_the_legal_name():
     """11/23 영어 이름은 한글 활동명으로 — 본명(윤진영) · 영어 그대로 · 빈 값은 None (MusicBrainz 이름을 그대로 씀)"""
+    web = ["Royal 44(로얄44) - I Been Freestyle | Royal44 #로얄44 ENA 음악차트쇼"]
     ok = llm_with(response('{"genres": ["HIPHOP"], "koreanName": " 로얄44 "}'))
-    assert ok.artist_info("Royal 44", [], [], None) == {"genres": ["HIPHOP"], "korean_name": "로얄44"}
+    assert ok.artist_info("Royal 44", [], [], None, web=web) == {"genres": ["HIPHOP"], "korean_name": "로얄44"}
     sent = json.loads(ok.client.models.requests[0]["contents"])
-    assert sent["legalNames"] == [] and ok.client.models.requests[0]["config"].response_json_schema["properties"]["koreanName"]
+    assert sent["legalNames"] == [] and sent["webResults"] == web
+    assert ok.client.models.requests[0]["config"].response_json_schema["properties"]["koreanName"]
     for answer in ("윤진영", "ASH ISLAND", ""):
         llm = llm_with(response(json.dumps({"genres": [], "koreanName": answer})))
         assert llm.artist_info("ASH ISLAND", ["윤진영"], [], None, legal_names=["윤진영"])["korean_name"] is None
+
+
+def test_artist_korean_name_must_be_an_alias_or_appear_next_to_the_name_in_a_search_result():
+    """11/24 근거 없이 물으니 Royal 44 → '로열포티포' 를 지어냄 — 별칭이거나, 검색 결과 한 건에 영어 이름과 함께 보일 때만"""
+    def ask(name, answer, aliases=(), web=()):
+        return llm_with(response(json.dumps({"genres": [], "koreanName": answer}))).artist_info(
+            name, list(aliases), [], None, web=list(web))["korean_name"]
+
+    assert ask("Royal 44", "로열포티포") is None                                          # 근거 없음
+    assert ask("Royal 44", "로열포티포", web=["Royal 44(로얄44) - I Been Freestyle"]) is None
+    assert ask("Car, the Garden", "카더가든", aliases=["메이슨 더 소울", "카더가든"]) == "카더가든"
+    assert ask("Skinny Brown", "스키니브라운", web=["Skinny Brown - 스키니브라운 | 나무위키"]) == "스키니브라운"
+    assert ask("YUL2", "전유진", web=["가수 전유진 | 첫 정규앨범 아디오스", "YUL2 (율) - Lost in Paradise | 싱글"]) is None
+    assert ask("YUL2", "율", web=["가수 전유진 | 첫 정규앨범 아디오스", "YUL2 (율) - Lost in Paradise | 싱글"]) == "율"
+    moon = llm_with(response('{"genres": [], "koreanName": "문수진"}'))     # 본명으로 활동하면 한글 본명이 활동명
+    assert moon.artist_info("Moon Sujin", ["문", "문수진"], [], None, legal_names=["Moon Sujin", "문수진"])["korean_name"] == "문수진"
 
 
 def test_concert_sends_images_before_the_text():
