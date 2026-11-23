@@ -21,7 +21,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from . import db as dbm
 from . import images as imgs
@@ -50,6 +50,7 @@ WEB_EVERY = timedelta(days=7)          # 아티스트마다 웹 검색은 7일�
 WEB_ARTISTS_PER_RUN = 30               # 한 번 실행에 웹 검색할 아티스트 수 — 나머지는 다음 새벽에 (실행이 너무 길어지지 않게)
 TICKET_SEARCHES = 10                   # 한 번 실행에 예매 오픈 찾기에 쓸 검색 크레딧 (11/22 8 → 10) — 나머지는 아티스트 조사에
 SEARCH_NAMES = 3                       # 김밥레코즈 검색어로 쓸 이름 수 (한글 이름 먼저)
+MAX_TRIES = 6                          # 다시 하기(retry)에서 이만큼 실패하면 더 하지 않음 — 행은 남겨 둠 (한도로 못 한 것은 세지 않음)
 
 
 class Pipeline:
@@ -80,11 +81,15 @@ class Pipeline:
         known = self._known_names()
         names: list[str] = []
         misses = 0
-        for mt20id in kopis.list_ids(self.http, key, start, end):
+        retry = self._retries("CONCERT")    # 지난번에 못 끝낸 공연 → 맨 앞에 (11/23 아웃박스)
+        ids = kopis.list_ids(self.http, key, start, end)
+        self._drop_unlisted(set(ids))
+        for mt20id in [i for i in ids if i in retry] + [i for i in ids if i not in retry]:
             try:
                 detail = kopis.detail(self.http, key, mt20id)
             except Exception as e:  # 한 건 실패로 실행 전체를 멈추지 않음
                 self._fail("concert_fetch", mt20id, e)
+                self._retry("CONCERT", mt20id, "detail", e)
                 misses += 1
                 if misses >= KOPIS_DOWN:   # 다시 불러도 계속 실패 — 남은 공연을 하나씩 기다리지 않음 (실행이 다음 일정까지 늘어지지 않게)
                     self.stats["concert_kopis_down"] += 1
@@ -92,6 +97,8 @@ class Pipeline:
                 continue
             misses = 0
             if not detail:
+                if mt20id in retry:
+                    self._retried("CONCERT", mt20id)
                 continue
             try:
                 fac = kopis.facility(self.http, key, detail.get("mt10id"))
@@ -102,7 +109,9 @@ class Pipeline:
             with self.sessions() as s:
                 item = self._item(s, "CONCERT", mt20id)
                 input_hash = content_hash({"v": CONCERT_VERSION, "detail": detail, "venue": venue})
-                if item is not None and item.input_hash == input_hash:
+                # 원문이 같으면 다시 정리하지 않음 — 정리(Gemini) · 출연진→팀 조회가 실패해 남은 공연은 원문이 같아도 다시
+                same = item is not None and item.input_hash == input_hash and retry.get(mt20id) not in ("llm", "cast")
+                if same:
                     self.stats["concert_same_input"] += 1
                     if item.status != "SKIPPED":
                         payload = json.loads(item.payload_json)
@@ -113,9 +122,14 @@ class Pipeline:
                             s.commit()
                             self.stats["concert_dates_fixed"] += 1
                         names += payload["concert"]["artistNames"]
-                    continue
+            if same:
+                if mt20id in retry:
+                    self._retried("CONCERT", mt20id)         # 상세를 못 받았던 공연 — 이번엔 받음
+                continue
             if getattr(self.llm, "exhausted", False):   # 하루 한도를 다 씀 · 서버가 계속 응답 못 함 — 이미지를 받지 않고 다음 실행에
-                self.stats[f"concert_llm_{getattr(self.llm, 'stop_reason', 'quota')}"] += 1
+                reason = getattr(self.llm, "stop_reason", "quota")
+                self.stats[f"concert_llm_{reason}"] += 1
+                self._retry("CONCERT", mt20id, "llm", reason, count=False)   # 한도 탓 — 실패 횟수로 세지 않음
                 continue
             facts = {"detail": {k: v for k, v in detail.items() if k not in _SKIP_FOR_LLM}, "venue": venue,
                      "knownArtists": _mentioned(known, detail)}
@@ -123,11 +137,13 @@ class Pipeline:
                 c = self.llm.concert(facts, self._concert_images(mt20id, detail))
             except LlmSkip as e:
                 self.stats[f"concert_llm_{e}"] += 1
+                self._retry("CONCERT", mt20id, "llm", e, count=str(e) not in ("quota", "unavailable"))
                 continue
             indie = c.get("relevance") == "INDIE"
+            cast_failed = False
             if indie and c.get("unmatchedCast") and not c.get("artistNames"):
                 # 포스터 · 글로 팀을 하나도 확인하지 못했을 때만 MusicBrainz 멤버 관계로 (확인한 팀이 있으면 남은 이름은 대개 그 팀 멤버 · 세션)
-                c["artistNames"], c["unmatchedCast"] = self._teams_for(c["unmatchedCast"])
+                c["artistNames"], c["unmatchedCast"], cast_failed = self._teams_for(c["unmatchedCast"])
             concert = to_concert(detail, c, venue)
             if concert["reviewNotes"]:
                 self.stats["concert_dates_fixed"] += 1
@@ -137,6 +153,10 @@ class Pipeline:
                              origin=concert.get("sourceUrl") or f"kopis:{mt20id}",
                              status="READY" if indie else "SKIPPED", note=None if indie else c.get("relevance"))
                 s.commit()
+            if cast_failed:
+                self._retry("CONCERT", mt20id, "cast", "MusicBrainz 출연진 → 팀 조회 실패")   # 원문이 같아도 다음에 다시 정리
+            elif mt20id in retry:
+                self._retried("CONCERT", mt20id)
             self.stats["concert_indie" if indie else "concert_skipped"] += 1
             if indie:
                 names += concert["artistNames"]
@@ -165,16 +185,19 @@ class Pipeline:
         self.stats["concert_image_slices"] += len(out)
         return out
 
-    def _teams_for(self, unmatched: list[str]) -> tuple[list[str], list[str]]:
-        """팀을 확인하지 못한 출연진(멤버 실명 등) → MusicBrainz "member of band" 로 팀 이름 → (찾은 팀, 그래도 남은 이름).
-        두 사람 이상이 같은 팀을 가리키거나, 그 사람의 팀이 하나뿐일 때만 팀으로 봅니다 (애매하면 남김 — 관리자가)."""
+    def _teams_for(self, unmatched: list[str]) -> tuple[list[str], list[str], bool]:
+        """팀을 확인하지 못한 출연진(멤버 실명 등) → MusicBrainz "member of band" 로 팀 이름 → (찾은 팀, 그래도 남은 이름, 조회 실패 여부).
+        두 사람 이상이 같은 팀을 가리키거나, 그 사람의 팀이 하나뿐일 때만 팀으로 봅니다 (애매하면 남김 — 관리자가).
+        조회가 하나라도 실패하면(서버 오류 등) 공연을 다시 하기에 남깁니다 (11/23 — 원문이 같으면 다시 안 보던 것)."""
         names = list(dict.fromkeys(n.strip() for n in unmatched if n and n.strip()))
         bands: dict[str, list[str]] = {}
+        failed = False
         for n in names[:MAX_CAST_LOOKUPS]:
             try:
                 bands[n] = musicbrainz.bands_of(self.http, n)
             except Exception as e:
                 self._fail("concert_cast", n, e)
+                failed = True
         support = Counter(b for found in bands.values() for b in set(found))
         teams, left = [], []
         for n in names:
@@ -186,7 +209,7 @@ class Pipeline:
                 self.stats["concert_cast_to_team"] += 1
             else:
                 left.append(n)
-        return list(dict.fromkeys(teams)), left
+        return list(dict.fromkeys(teams)), left, failed
 
     def _tickets(self):
         """KOPIS 에 일반 예매 오픈 일시가 없는 인디 공연 → 웹 검색. 출처는 후보의 evidence 로 관리자에게.
@@ -264,11 +287,61 @@ class Pipeline:
                     self.stats["artist_not_found"] += 1   # 동명이인 · 표기 차이로 애매하면 만들지 않음
                     log.info("crawl_artist_not_found name=%s", name)
                     self._miss(name.strip(), "not_found")
-                    continue
-                if mb["mbid"] not in self._loaded:       # 다른 이름(한글 · 영어)으로 이미 본 아티스트
+                elif mb["mbid"] not in self._loaded:     # 다른 이름(한글 · 영어)으로 이미 본 아티스트
                     self._load(mb, name.strip())
-            except Exception as e:
+            except Exception as e:                       # 서버 오류 등 — 못 찾음(miss)과 달리 실행 끝에 한 번 더 · 남으면 다음 실행 맨 앞에
                 self._fail("artist", name, e)
+                self._retry("NAME", norm(name)[:200], name.strip(), e)
+                continue
+            self._retried("NAME", norm(name)[:200])      # 끝남 (찾음 · 못 찾음) — 남아 있던 다시 하기는 지움
+
+    # ---------- 다시 하기 (11/23 아웃박스) ----------
+
+    def retry_names(self) -> list[str]:
+        """지난번에 찾다가 실패한 이름 — 새벽 실행이 새 이름보다 먼저 찾음 (runner)"""
+        return list(self._retries("NAME").values())
+
+    def retry(self, names: bool = True):
+        """실행 끝 — 못 끝낸 것(이번 실행 · 앞선 실행)을 한 번 더. 그래도 남으면 다음 실행 맨 앞에.
+        공연은 Gemini 가 하루 한도에 걸려 있으면 하지 않음 (다음 실행에)."""
+        todo = self.retry_names() if names else []
+        if todo:
+            self.stats["retry_pass_names"] += len(todo)
+            self.artists(todo)
+        if self._retries("CONCERT") and not getattr(self.llm, "exhausted", False):
+            self.stats["retry_pass_concerts"] += 1
+            self.concerts()
+        with self.sessions() as s:
+            tries = s.scalars(select(dbm.Retry.tries)).all()
+        self.stats["retry_left"] = sum(1 for t in tries if t < MAX_TRIES)
+        if any(t >= MAX_TRIES for t in tries):
+            self.stats["retry_gave_up"] = sum(1 for t in tries if t >= MAX_TRIES)
+
+    def _retries(self, kind: str) -> dict[str, str]:
+        """{key: value} — 실패 횟수가 MAX_TRIES 보다 적은 것만, 먼저 실패한 순"""
+        with self.sessions() as s:
+            rows = s.execute(select(dbm.Retry.key, dbm.Retry.value).where(dbm.Retry.kind == kind, dbm.Retry.tries < MAX_TRIES)
+                             .order_by(dbm.Retry.id)).all()
+        return dict(rows)
+
+    def _retry(self, kind: str, key: str, value: str, error, count: bool = True):
+        with self.sessions() as s:
+            dbm.queue_retry(s, kind, key, value, str(error), count)
+            s.commit()
+        self.stats[f"retry_{kind.lower()}_queued"] += 1
+
+    def _retried(self, kind: str, key: str):
+        with self.sessions() as s:
+            done = dbm.drop_retry(s, kind, key)
+            s.commit()
+        if done:
+            self.stats[f"retry_{kind.lower()}_done"] += 1
+
+    def _drop_unlisted(self, listed: set[str]):
+        """KOPIS 목록에서 빠진 공연(끝남 · 기간 밖)은 더 하지 않음"""
+        with self.sessions() as s:
+            s.execute(delete(dbm.Retry).where(dbm.Retry.kind == "CONCERT", dbm.Retry.key.not_in(listed)))
+            s.commit()
 
     def _miss(self, name: str, reason: str):
         """만들지 못한 이름을 남겨 30일 동안 새 이름 칸에서 뺌 (runner._new_names)"""

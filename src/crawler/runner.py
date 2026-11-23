@@ -49,7 +49,7 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
         def artists():
             new = _new_names(sessions, found)
             pipeline.stats["artist_new_names"] = len(new)   # 0 이면 더 찾을 새 이름이 없음 (연달아 돌릴 때 멈추는 기준)
-            pipeline.artists(seeds + new)
+            pipeline.artists(pipeline.retry_names() + seeds + new)   # 지난번에 찾다가 실패한 이름 먼저 (11/23 아웃박스)
         stage("아티스트", artists)
         stage("다시 보기", pipeline.refresh_known)                # 시드 · 공연에 없는, 전에 찾은 아티스트의 신보
         if concerts_failed:   # 한 번 더 — 11/22 KOPIS 차단이 몇 분 이어져 공연만 실패 · 아티스트 단계(1~3시간) 뒤엔 풀려 있을 때가 많음
@@ -57,6 +57,7 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
             pipeline.stats["concert_stage_retry"] += 1
             if stage("공연 다시", pipeline.concerts) is None:
                 errors.insert(0, first)
+    stage("다시 하기", lambda: pipeline.retry(names=kind == "dawn"))   # 못 끝낸 이름 · 공연을 한 번 더 — 남으면 다음 실행 맨 앞에
     stage("전송", pipeline.send)
     status = "FAILED" if errors else "DONE"
     error = " | ".join(errors)[:2000] or None
