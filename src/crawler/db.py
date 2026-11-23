@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import (BigInteger, DateTime, Integer, String, Text, UniqueConstraint, create_engine, select)
+from sqlalchemy import (BigInteger, DateTime, Integer, String, Text, UniqueConstraint, create_engine, delete, select)
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -100,6 +100,23 @@ class ArtistMiss(Base):
     checked_at: Mapped[datetime] = mapped_column(DateTime)
 
 
+class Retry(Base):
+    """중간에 못 끝낸 일 (11/23 아웃박스) — 오류 · 한도 · 외부 서버 문제로 실패한 것을 남겨 실행 끝에 한 번 더 하고,
+    그래도 남으면 다음 실행 맨 앞에 합니다. 끝나면 지웁니다.
+    kind · value: NAME(새 아티스트 이름 찾기 · value=이름) · CONCERT(공연 정리 · value=detail 상세 받기 · llm 정리 · cast 출연진→팀)
+    tries: 실패 횟수 — 한도(Gemini 하루 한도 · 서버 응답 없음)로 못 한 것은 세지 않음 · pipeline.MAX_TRIES 넘으면 더 하지 않음(남겨 둠)"""
+    __tablename__ = "retry"
+    __table_args__ = (UniqueConstraint("kind", "key"),)
+    id: Mapped[int] = mapped_column(Id, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    key: Mapped[str] = mapped_column(String(200))
+    value: Mapped[str] = mapped_column(String(200))
+    error: Mapped[str | None] = mapped_column(Text)
+    tries: Mapped[int] = mapped_column(Integer, default=0)
+    first_at: Mapped[datetime] = mapped_column(DateTime)
+    last_at: Mapped[datetime] = mapped_column(DateTime)
+
+
 class AlbumLink(Base):
     """앨범 대표 키 — 웹 검색 · 인디스트릿에서 먼저 찾은 앨범을 나중에 MusicBrainz 에 생긴 같은 앨범과 하나로 (Studio 후보가 둘이 되지 않게).
     site: musicbrainz(id=release group id) · title(id=아티스트 키:종류:정규화한 제목)"""
@@ -154,6 +171,19 @@ def artist_key_for(db: Session, name: str, links: dict[str, str], aliases: list[
 
 def lookup_artist_key(db: Session, name: str) -> str | None:
     return db.scalar(select(ArtistLink.key).where(ArtistLink.site == "name", ArtistLink.site_id == norm(name)))
+
+
+def queue_retry(db: Session, kind: str, key: str, value: str, error: str, count: bool = True):
+    row = db.scalar(select(Retry).where(Retry.kind == kind, Retry.key == key))
+    if row is None:
+        row = Retry(kind=kind, key=key, value=value[:200], tries=0, first_at=now())
+        db.add(row)
+    row.value, row.error, row.last_at = value[:200], error[:2000], now()
+    row.tries = (row.tries or 0) + (1 if count else 0)
+
+
+def drop_retry(db: Session, kind: str, key: str) -> bool:
+    return db.execute(delete(Retry).where(Retry.kind == kind, Retry.key == key)).rowcount > 0
 
 
 def remember_miss(db: Session, name: str, reason: str):
