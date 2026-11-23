@@ -207,6 +207,25 @@ def test_missed_names_step_aside_for_30_days_so_later_names_get_their_turn(sessi
     assert runner._new_names(sessions, ["없는팀", "이지민", "실리카겔"]) == ["없는팀"]     # 30일이 지나면 다시 찾음
 
 
+def test_search_budget_is_shared_by_all_runs_of_the_day(sessions):
+    """11/23 연달아 돌리기 — 검색 한도는 실행마다가 아니라 하루(한국 시간) 30 (Tavily 무료 월 1,000)"""
+    assert runner.search_budget(sessions) == 20                         # 오늘 첫 실행 — 실행당 20
+    midnight = datetime.now(runner.KST).replace(hour=0, minute=0, second=0, microsecond=0)
+    utc = lambda d: d.astimezone(runner.timezone.utc).replace(tzinfo=None)
+    with sessions() as s:
+        s.add(dbm.CrawlRun(kind="dawn", status="DONE", started_at=utc(midnight - timedelta(minutes=1)),
+                           stats_json=json.dumps({"web_search_requests": 20})))          # 어제 — 세지 않음
+        s.add(dbm.CrawlRun(kind="dawn", status="DONE", started_at=utc(midnight + timedelta(hours=3)),
+                           stats_json=json.dumps({"web_search_requests": 20})))
+        s.commit()
+    assert runner.search_budget(sessions) == 10
+    with sessions() as s:
+        s.add(dbm.CrawlRun(kind="dawn", status="DONE", started_at=utc(midnight + timedelta(hours=4)),
+                           stats_json=json.dumps({"web_search_requests": 15})))
+        s.commit()
+    assert runner.search_budget(sessions) == 0
+
+
 def test_discogs_only_through_musicbrainz_link(sessions):
     w = web()
     w.add("artist/bs?", {"id": "bs", "name": "검정치마", "aliases": [],
@@ -262,6 +281,7 @@ def test_missing_keys_degrade_instead_of_crashing(sessions):
     out = runner.run("dawn", sessions, p, ["검정치마"])
     assert out["status"] == "DONE"
     assert out["stats"]["concert_no_kopis_key"] == 1
+    assert out["stats"]["artist_new_names"] == 0                       # 공연 · 인디스트릿에서 새 이름 없음 (연달아 돌릴 때 멈추는 기준)
     a = json.loads(next(iter(items(sessions, "ARTIST").values())).payload_json)
     assert a["genres"] == []                                        # 키가 없으면 장르는 비우고 관리자가
 

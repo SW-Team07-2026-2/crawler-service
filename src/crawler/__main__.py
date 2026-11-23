@@ -26,7 +26,8 @@ def build(settings, dry_run: bool):
         log.warning("gemini-api-key 없음 — 장르 · 공연 정리 · 웹 검색(신보 · 피지컬 · 굿즈)은 건너뜁니다")
     searcher = None
     if llm is not None and settings.tavily_api_key:
-        searcher = WebSearch(llm, Tavily(settings.tavily_api_key), PageReader(http, settings.user_agent))
+        searcher = WebSearch(llm, Tavily(settings.tavily_api_key, budget=runner.search_budget(sessions)),
+                             PageReader(http, settings.user_agent))
     elif llm is not None:
         log.warning("tavily-api-key 없음 — 웹 검색(신보 · 피지컬 · 굿즈 · 예매 오픈)은 건너뜁니다")
     studio = None if dry_run else Studio(settings.studio_url, settings.crawler_secret)

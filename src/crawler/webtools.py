@@ -28,6 +28,7 @@ EXCLUDE_DOMAINS = ["spotify.com", "open.spotify.com"]
 
 
 RUN_BUDGET = 20   # 실행 한 번에 쓸 검색 크레딧 — 11/22 15 → 20. 새벽 20 + 점심 10(예매 오픈만 · TICKET_SEARCHES) = 하루 30 · 월 약 900 (무료 1,000 · 손 실행 · 재시도 몫 남김)
+DAILY_SEARCHES = 30   # 하루(한국 시간) 검색 크레딧 — 실행을 몇 번 돌리든 이만큼만 (11/23 연달아 돌리기 · runner.search_budget)
 
 
 class SearchQuota(Exception):
