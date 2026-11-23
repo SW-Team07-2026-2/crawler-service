@@ -6,6 +6,8 @@ import unicodedata
 from datetime import date
 
 _DROP = re.compile(r"[\s\W_]+", re.UNICODE)
+HANGUL = re.compile(r"[가-힣]")
+LATIN = re.compile(r"[A-Za-z]")
 
 
 def norm(name: str) -> str:

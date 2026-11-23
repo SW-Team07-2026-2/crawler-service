@@ -33,9 +33,9 @@ def test_schemas_fit_structured_output_limits():
         assert "anyOf" not in text and '"type": [' not in text
 
 
-def test_artist_genres_request_and_cleanup():
+def test_artist_info_request_and_cleanup():
     llm = llm_with(response('{"genres": ["shoegaze", "INDIE_ROCK", "SHOEGAZE", "NOPE", "EMO", "PUNK"]}'))
-    assert llm.artist_genres("Silica Gel", ["실리카겔"], ["Kyo181"], "Magic Strawberry Sound") == ["SHOEGAZE", "INDIE_ROCK", "EMO"]
+    assert llm.artist_info("Silica Gel", ["실리카겔"], ["Kyo181"], "Magic Strawberry Sound")["genres"] == ["SHOEGAZE", "INDIE_ROCK", "EMO"]
     req = llm.client.models.requests[0]
     assert req["model"] == "gemini-3.5-flash-lite"
     cfg = req["config"]
@@ -43,6 +43,17 @@ def test_artist_genres_request_and_cleanup():
     assert cfg.response_json_schema["properties"]["genres"]["items"]["enum"] == GENRES
     assert cfg.thinking_config.thinking_level.value == "HIGH" and cfg.max_output_tokens >= 16000   # 생각 토큰까지 들어갈 자리
     assert llm.input_tokens == 100 and llm.output_tokens == 20 + 30                                # 생각 토큰 포함
+
+
+def test_artist_korean_name_is_kept_only_when_it_is_hangul_and_not_the_legal_name():
+    """11/23 영어 이름은 한글 활동명으로 — 본명(윤진영) · 영어 그대로 · 빈 값은 None (MusicBrainz 이름을 그대로 씀)"""
+    ok = llm_with(response('{"genres": ["HIPHOP"], "koreanName": " 로얄44 "}'))
+    assert ok.artist_info("Royal 44", [], [], None) == {"genres": ["HIPHOP"], "korean_name": "로얄44"}
+    sent = json.loads(ok.client.models.requests[0]["contents"])
+    assert sent["legalNames"] == [] and ok.client.models.requests[0]["config"].response_json_schema["properties"]["koreanName"]
+    for answer in ("윤진영", "ASH ISLAND", ""):
+        llm = llm_with(response(json.dumps({"genres": [], "koreanName": answer})))
+        assert llm.artist_info("ASH ISLAND", ["윤진영"], [], None, legal_names=["윤진영"])["korean_name"] is None
 
 
 def test_concert_sends_images_before_the_text():
@@ -70,13 +81,13 @@ def test_minute_limit_waits_retry_delay_then_daily_limit_stops_the_rest_of_the_r
     sleeps = []
     llm = llm_with(quota_error("GenerateRequestsPerMinutePerProjectPerModel-FreeTier"), response('{"genres": []}'),
                    quota_error("GenerateRequestsPerDayPerProjectPerModel-FreeTier"), sleeps=sleeps)
-    assert llm.artist_genres("A", [], [], None) == []
+    assert llm.artist_info("A", [], [], None)["genres"] == []
     assert sleeps == [24.0]                                       # API 가 알려 준 23초 + 1
     with pytest.raises(LlmSkip, match="quota"):
-        llm.artist_genres("B", [], [], None)
+        llm.artist_info("B", [], [], None)
     assert llm.exhausted
     with pytest.raises(LlmSkip, match="quota"):                   # 남은 호출은 API 를 부르지 않음
-        llm.artist_genres("C", [], [], None)
+        llm.artist_info("C", [], [], None)
     assert len(llm.client.models.requests) == 3
 
 
@@ -89,7 +100,7 @@ def test_server_error_that_keeps_coming_stops_the_rest_of_the_run_not_the_stage(
         llm.concert({"detail": {"mt20id": "PF1"}})
     assert sleeps == [60, 120, 240, 480] and llm.exhausted and llm.stop_reason == "unavailable"   # 1 · 2 · 4 · 8분 기다린 뒤에야
     with pytest.raises(LlmSkip, match="unavailable"):              # 남은 호출은 API 를 부르지 않음
-        llm.artist_genres("A", [], [], None)
+        llm.artist_info("A", [], [], None)
     assert len(llm.client.models.requests) == 5
 
 
@@ -97,7 +108,7 @@ def test_server_error_that_passes_within_the_waits_is_just_a_delay():
     busy = lambda: errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
     sleeps = []
     llm = llm_with(busy(), busy(), busy(), response('{"genres": ["EMO"]}'), sleeps=sleeps)
-    assert llm.artist_genres("A", [], [], None) == ["EMO"] and sleeps == [60, 120, 240] and not llm.exhausted
+    assert llm.artist_info("A", [], [], None)["genres"] == ["EMO"] and sleeps == [60, 120, 240] and not llm.exhausted
 
 
 def test_bad_request_skips_only_that_item_but_auth_errors_stop_the_run():
@@ -110,8 +121,8 @@ def test_bad_request_skips_only_that_item_but_auth_errors_stop_the_run():
 def test_calls_are_spaced_for_the_minute_limit():
     sleeps = []
     llm = Llm(None, "m", client=fake_client(response('{"genres": []}'), response('{"genres": []}')), sleep=sleeps.append, gap=60)
-    llm.artist_genres("A", [], [], None)
-    llm.artist_genres("B", [], [], None)
+    llm.artist_info("A", [], [], None)
+    llm.artist_info("B", [], [], None)
     assert len(sleeps) == 1 and 59 < sleeps[0] <= 60
 
 

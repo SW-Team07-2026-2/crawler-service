@@ -26,7 +26,7 @@ from sqlalchemy import delete, select
 from . import db as dbm
 from . import images as imgs
 from .enums import ARTIST_COMPOSITIONS, ARTIST_GENDERS
-from .keys import content_hash, norm
+from .keys import LATIN, content_hash, norm
 from .llm import LlmSkip
 from .sources import discogs, gimbab, indistreet, kopis, musicbrainz
 from .studio import StudioRejected
@@ -51,6 +51,7 @@ WEB_ARTISTS_PER_RUN = 30               # 한 번 실행에 웹 검색할 아티�
 TICKET_SEARCHES = 10                   # 한 번 실행에 예매 오픈 찾기에 쓸 검색 크레딧 (11/22 8 → 10) — 나머지는 아티스트 조사에
 SEARCH_NAMES = 3                       # 김밥레코즈 검색어로 쓸 이름 수 (한글 이름 먼저)
 MAX_TRIES = 6                          # 다시 하기(retry)에서 이만큼 실패하면 더 하지 않음 — 행은 남겨 둠 (한도로 못 한 것은 세지 않음)
+ARTIST_ASK = 2                         # 아티스트마다 Gemini 에 묻는 것 — 11/23 장르 → 장르 + 한글 이름 (올리면 모든 아티스트를 한 번 다시 물음)
 
 
 class Pipeline:
@@ -395,23 +396,29 @@ class Pipeline:
 
         source = {"mb": mb, "albums": [g["title"] for g in groups], "label": labels[0] if labels else None}
         self._discover(key, mb, names, groups, source["label"])
-        # 장르는 아티스트가 같으면(id · 이름 · 별칭) 다시 묻지 않음 — 신보 하나로 장르가 흔들려 모든 앨범이 승인 대기로 돌아가는 것을 막음
-        identity = content_hash({k: mb[k] for k in ("mbid", "name", "aliases")})
+        # 장르 · 한글 이름은 아티스트가 같으면(id · 이름 · 별칭) 다시 묻지 않음 — 신보 하나로 장르가 흔들려 모든 앨범이 승인 대기로 돌아가는 것을 막음
+        identity = content_hash({**{k: mb[k] for k in ("mbid", "name", "aliases")}, "ask": ARTIST_ASK})
         with self.sessions() as s:
             found = self._found(s, key)
             item = self._item(s, "ARTIST", key)
-            prev = json.loads(item.payload_json)["genres"] if item is not None else []
+            prev = json.loads(item.payload_json) if item is not None else {"genres": [], "name": None}
             if item is not None and item.input_hash == identity:
-                genres, judged = prev, True
+                genres, name, judged = prev["genres"], prev["name"], True
             elif self.llm is None:
-                genres, judged = prev, False             # 키가 생기면 그때 물음
+                genres, name, judged = prev["genres"], prev["name"], False   # 키가 생기면 그때 물음
             else:
-                asked_genres = self._genres(mb, source)  # None = 이번엔 못 물음 (거절 · 잘림) → 다음 실행에 다시
-                genres, judged = (prev, False) if asked_genres is None else (asked_genres, True)
+                info = self._ask(mb, source)             # None = 이번엔 못 물음 (거절 · 잘림) → 다음 실행에 다시
+                if info is None:
+                    genres, name, judged = prev["genres"], prev["name"], False
+                else:
+                    genres, name, judged = info["genres"], _display_name(mb["name"], info["korean_name"]), True
+            name = name or mb["name"]
+            if name != mb["name"]:
+                self.stats["artist_korean_name"] += 1
             goods, goods_evidence = _goods(found["GOODS"])
             artist = {
                 "source": "crawler", "external_id": key,
-                "name": mb["name"][:100], "genres": genres,
+                "name": name[:100], "genres": genres,
                 "label": source["label"][:100] if source["label"] else None,
                 "debut_year": min(years) if years else None,
                 "profile_url": None,   # 공개 이미지 버킷이 정해지기 전까지 비움 (계약 3장)
@@ -565,9 +572,9 @@ class Pipeline:
             out[f.kind].append({"site": f.site, "data": json.loads(f.data_json), "evidence": json.loads(f.evidence_json)})
         return out
 
-    def _genres(self, mb: dict, source: dict) -> list[str] | None:
+    def _ask(self, mb: dict, source: dict) -> dict | None:
         try:
-            return self.llm.artist_genres(mb["name"], mb["aliases"], source["albums"], source["label"])
+            return self.llm.artist_info(mb["name"], mb["aliases"], source["albums"], source["label"], mb.get("legal_names", []))
         except LlmSkip as e:
             self.stats[f"artist_llm_{e}"] += 1
             return None
@@ -643,6 +650,12 @@ class Pipeline:
     def _fail(self, what, key, e):
         self.stats[f"{what}_error"] += 1
         log.warning("crawl_%s_failed item=%s error=%s", what, key, str(e)[:300])   # key= 는 로그 가림 필터가 비밀로 봄 (11/19)
+
+
+def _display_name(mb_name: str, korean: str | None) -> str:
+    """11/23 보내는 이름은 한글 — MusicBrainz 이름에 영어가 섞여 있으면 Gemini 가 고른 한글 활동명 (모르면 MusicBrainz 이름 그대로).
+    이미 한글뿐인 이름은 바꾸지 않음 (박성진 → 성진 같은 다른 표기로 흔들리지 않게)"""
+    return korean if korean and LATIN.search(mb_name) else mb_name
 
 
 def _same_album(title: str, titles: list[str]) -> str | None:

@@ -59,9 +59,10 @@ def make_http(sessions, web) -> Http:
 
 
 class FakeLlm:
-    def __init__(self, concerts=None, genres=None):
+    def __init__(self, concerts=None, genres=None, names=None):
         self.concerts = concerts or {}      # mt20id → 결과
         self.genres = genres or {}          # 이름 → 장르
+        self.names = names or {}            # 이름 → 한글 활동명
         self.calls: list[str] = []
         self.facts: dict[str, dict] = {}    # mt20id → Haiku 에 넘긴 값
         self.images: dict[str, int] = {}    # mt20id → 이미지 조각 수
@@ -73,9 +74,9 @@ class FakeLlm:
         self.facts[mt20id], self.images[mt20id] = facts, len(images or [])
         return copy.deepcopy(self.concerts[mt20id])     # 실제 Gemini 처럼 부를 때마다 새 결과 (파이프라인이 고쳐 써도 다음 호출에 안 남게)
 
-    def artist_genres(self, name, aliases, albums, label):
+    def artist_info(self, name, aliases, albums, label, legal_names=()):
         self.calls.append(f"artist:{name}")
-        return self.genres.get(name, [])
+        return {"genres": self.genres.get(name, []), "korean_name": self.names.get(name)}
 
 
 class FakeStudio:

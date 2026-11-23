@@ -110,6 +110,40 @@ def test_second_run_sends_nothing_and_skips_llm_then_only_changed_album_goes(ses
     assert len(llm.calls) == llm_calls                              # 아티스트 원본(이름 · 앨범 목록 · 레이블)은 그대로
 
 
+def test_english_name_goes_as_the_korean_name_and_artists_judged_before_are_asked_once_more(sessions):
+    """11/23 영어 이름(Silica Gel)은 Gemini 가 고른 한글 활동명으로 · 한글뿐인 이름(검정치마)은 그대로.
+    한글 이름을 묻기 전에 장르만 정한 아티스트는 다음 실행에 한 번 다시 물음 (ARTIST_ASK) · 못 물으면 전에 보낸 이름 그대로"""
+    from crawler.llm import LlmSkip
+
+    def set_old_input():
+        with sessions() as s:
+            s.execute(update(dbm.Item).where(dbm.Item.type == "ARTIST").values(input_hash="genres-only"))
+            s.commit()
+
+    w = web()
+    genres = {"검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC"]}
+    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio(), FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres)),
+               ["검정치마"])
+    set_old_input()
+
+    studio = FakeStudio()
+    llm = FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres, names={"Silica Gel": "실리카겔", "검정치마": "검은 치마"})
+    out = runner.run("dawn", sessions, pipeline(sessions, w, studio, llm), ["검정치마"])
+    assert sorted(c for c in llm.calls if c.startswith("artist:")) == ["artist:Silica Gel", "artist:검정치마"]
+    assert [(path, [i["name"] for i in body["items"]]) for path, body in studio.posts] == [(ARTISTS, ["실리카겔"])]
+    assert out["stats"]["artist_korean_name"] == 1                  # 앨범은 장르가 같아 다시 가지 않음
+
+    class NoQuota(FakeLlm):
+        def artist_info(self, *args, **kwargs):
+            raise LlmSkip("quota")
+
+    set_old_input()
+    studio = FakeStudio()
+    runner.run("dawn", sessions, pipeline(sessions, w, studio, NoQuota({"PF100": INDIE, "PF200": MAINSTREAM})), ["검정치마"])
+    assert studio.posts == []                                        # 영어 이름으로 되돌아가지 않음
+    assert {json.loads(i.payload_json)["name"] for i in items(sessions, "ARTIST").values()} == {"검정치마", "실리카겔"}
+
+
 def test_known_artist_is_refreshed_without_seed_or_concert_and_genres_stay(sessions):
     """공연에서 찾은 실리카겔은 시드에 없음 — 그래도 다음 새벽에 신보가 들어오고, 장르는 다시 묻지 않음 (모든 앨범이 다시 가지 않게)"""
     w = web()
@@ -834,7 +868,7 @@ def test_artist_without_genres_waits_until_genres_are_judged(sessions):
     from crawler.llm import LlmSkip
 
     class NoQuota(FakeLlm):
-        def artist_genres(self, name, aliases, albums, label):
+        def artist_info(self, name, aliases, albums, label, legal_names=()):
             raise LlmSkip("quota")
 
     w, studio = web(), FakeStudio()
