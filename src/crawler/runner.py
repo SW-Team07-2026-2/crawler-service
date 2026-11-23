@@ -9,7 +9,7 @@ from sqlalchemy import select
 from . import db as dbm
 from .keys import norm
 from .pipeline import Pipeline
-from .webtools import DAILY_SEARCHES, RUN_BUDGET
+from .webtools import MONTHLY_SEARCHES, RUN_BUDGET, SEARCH_RESERVE
 
 log = logging.getLogger(__name__)
 STALE = timedelta(hours=6)          # 이보다 오래된 RUNNING 은 죽은 실행으로 봄
@@ -91,14 +91,22 @@ def _new_names(sessions, names: list[str]) -> list[str]:
     return out
 
 
-def search_budget(sessions) -> int:
-    """이번 실행에 쓸 검색 크레딧 — 오늘(한국 시간) 앞선 실행이 쓴 만큼 빼고, 실행당 RUN_BUDGET 을 넘지 않음"""
-    midnight = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
-    since = midnight.astimezone(timezone.utc).replace(tzinfo=None)        # crawl_run 시각은 UTC
+def search_budget(sessions, now: datetime | None = None) -> int:
+    """이번 실행에 쓸 검색 크레딧 — 이번 달 남은 크레딧(예비 몫 빼고)을 남은 날수로 나눈 것이 하루 몫 (한국 시간).
+    오늘 앞선 실행이 쓴 만큼 빼고, 실행당 RUN_BUDGET 까지. 덜 쓴 날이 있으면 남은 날의 몫이 늘어납니다."""
+    day = (now or datetime.now(KST)).replace(hour=0, minute=0, second=0, microsecond=0)
+    month = day.replace(day=1)
+    days_left = ((month + timedelta(days=32)).replace(day=1) - day).days     # 오늘 포함
+    used_month, used_today = _searches_since(sessions, month), _searches_since(sessions, day)
+    daily = (MONTHLY_SEARCHES - SEARCH_RESERVE - (used_month - used_today)) // days_left
+    return max(0, min(RUN_BUDGET, daily - used_today))
+
+
+def _searches_since(sessions, when: datetime) -> int:
+    since = when.astimezone(timezone.utc).replace(tzinfo=None)              # crawl_run 시각은 UTC
     with sessions() as s:
         rows = s.scalars(select(dbm.CrawlRun.stats_json).where(dbm.CrawlRun.started_at >= since)).all()
-    used = sum(json.loads(r).get("web_search_requests", 0) for r in rows if r)
-    return max(0, min(RUN_BUDGET, DAILY_SEARCHES - used))
+    return sum(json.loads(r).get("web_search_requests", 0) for r in rows if r)
 
 
 def read_seeds(path) -> list[str]:

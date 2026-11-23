@@ -207,23 +207,26 @@ def test_missed_names_step_aside_for_30_days_so_later_names_get_their_turn(sessi
     assert runner._new_names(sessions, ["없는팀", "이지민", "실리카겔"]) == ["없는팀"]     # 30일이 지나면 다시 찾음
 
 
-def test_search_budget_is_shared_by_all_runs_of_the_day(sessions):
-    """11/23 연달아 돌리기 — 검색 한도는 실행마다가 아니라 하루(한국 시간) 30 (Tavily 무료 월 1,000)"""
-    assert runner.search_budget(sessions) == 20                         # 오늘 첫 실행 — 실행당 20
-    midnight = datetime.now(runner.KST).replace(hour=0, minute=0, second=0, microsecond=0)
+def test_search_budget_spreads_the_month_over_the_days_left(sessions):
+    """11/23 검색 한도 — 이번 달 남은 크레딧(1,000 - 예비 100 - 쓴 것)을 남은 날수로 나눈 것이 하루 몫 · 실행 횟수와 무관"""
+    now = datetime(2026, 11, 23, 13, 0, tzinfo=runner.KST)                 # 11/23 ~ 11/30 = 8일
     utc = lambda d: d.astimezone(runner.timezone.utc).replace(tzinfo=None)
-    with sessions() as s:
-        s.add(dbm.CrawlRun(kind="dawn", status="DONE", started_at=utc(midnight - timedelta(minutes=1)),
-                           stats_json=json.dumps({"web_search_requests": 20})))          # 어제 — 세지 않음
-        s.add(dbm.CrawlRun(kind="dawn", status="DONE", started_at=utc(midnight + timedelta(hours=3)),
-                           stats_json=json.dumps({"web_search_requests": 20})))
-        s.commit()
-    assert runner.search_budget(sessions) == 10
-    with sessions() as s:
-        s.add(dbm.CrawlRun(kind="dawn", status="DONE", started_at=utc(midnight + timedelta(hours=4)),
-                           stats_json=json.dumps({"web_search_requests": 15})))
-        s.commit()
-    assert runner.search_budget(sessions) == 0
+
+    def run(when, n):
+        with sessions() as s:
+            s.add(dbm.CrawlRun(kind="dawn", status="DONE", started_at=utc(when), stats_json=json.dumps({"web_search_requests": n})))
+            s.commit()
+
+    assert runner.search_budget(sessions, now) == 40                     # 900 // 8 = 112 → 실행당 40
+    run(datetime(2026, 10, 31, 12, 0, tzinfo=runner.KST), 500)            # 지난달 — 세지 않음
+    run(datetime(2026, 11, 20, 3, 30, tzinfo=runner.KST), 143)            # 이번 달 앞선 날 → 하루 (900 - 143) // 8 = 94
+    run(datetime(2026, 11, 23, 3, 30, tzinfo=runner.KST), 40)
+    assert runner.search_budget(sessions, now) == 40                     # 오늘 남은 54 → 실행당 40
+    run(datetime(2026, 11, 23, 11, 0, tzinfo=runner.KST), 40)
+    assert runner.search_budget(sessions, now) == 14                     # 94 - 80
+    run(datetime(2026, 11, 23, 12, 0, tzinfo=runner.KST), 14)
+    assert runner.search_budget(sessions, now) == 0
+    assert runner.search_budget(sessions, datetime(2026, 11, 24, 3, 30, tzinfo=runner.KST)) == 40   # 다음 날 (900-237)//7 = 94
 
 
 def test_discogs_only_through_musicbrainz_link(sessions):
