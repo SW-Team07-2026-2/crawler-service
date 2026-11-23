@@ -1,18 +1,21 @@
 """실행 한 번 (새벽 · 점심) — crawl_run 으로 겹침을 막고 건수 · 토큰 · 오류를 남깁니다."""
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
 from . import db as dbm
 from .keys import norm
 from .pipeline import Pipeline
+from .webtools import DAILY_SEARCHES, RUN_BUDGET
 
 log = logging.getLogger(__name__)
 STALE = timedelta(hours=6)          # 이보다 오래된 RUNNING 은 죽은 실행으로 봄
 MAX_NEW_ARTISTS = 150               # 공연 출연진에서 찾은 새 이름은 한 번에 이만큼만 (MusicBrainz 초당 1건 · 11/23 50 → 150)
 MISS_RETRY = timedelta(days=30)     # 못 찾은 이름은 이만큼 지나야 다시 찾음 (MusicBrainz 검색 캐시와 같은 30일)
+KST = ZoneInfo("Asia/Seoul")
 
 
 def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
@@ -43,7 +46,11 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
     concerts_failed = bool(errors)
     if kind == "dawn":
         found += stage("인디스트릿", pipeline.indistreet) or []   # 인디스트릿 최근 발매 — 아티스트 이름은 새 아티스트 찾기에도
-        stage("아티스트", lambda: pipeline.artists(seeds + _new_names(sessions, found)))
+        def artists():
+            new = _new_names(sessions, found)
+            pipeline.stats["artist_new_names"] = len(new)   # 0 이면 더 찾을 새 이름이 없음 (연달아 돌릴 때 멈추는 기준)
+            pipeline.artists(seeds + new)
+        stage("아티스트", artists)
         stage("다시 보기", pipeline.refresh_known)                # 시드 · 공연에 없는, 전에 찾은 아티스트의 신보
         if concerts_failed:   # 한 번 더 — 11/22 KOPIS 차단이 몇 분 이어져 공연만 실패 · 아티스트 단계(1~3시간) 뒤엔 풀려 있을 때가 많음
             first = errors.pop(0)
@@ -82,6 +89,16 @@ def _new_names(sessions, names: list[str]) -> list[str]:
             if len(out) >= MAX_NEW_ARTISTS:
                 break
     return out
+
+
+def search_budget(sessions) -> int:
+    """이번 실행에 쓸 검색 크레딧 — 오늘(한국 시간) 앞선 실행이 쓴 만큼 빼고, 실행당 RUN_BUDGET 을 넘지 않음"""
+    midnight = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+    since = midnight.astimezone(timezone.utc).replace(tzinfo=None)        # crawl_run 시각은 UTC
+    with sessions() as s:
+        rows = s.scalars(select(dbm.CrawlRun.stats_json).where(dbm.CrawlRun.started_at >= since)).all()
+    used = sum(json.loads(r).get("web_search_requests", 0) for r in rows if r)
+    return max(0, min(RUN_BUDGET, DAILY_SEARCHES - used))
 
 
 def read_seeds(path) -> list[str]:
