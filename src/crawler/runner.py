@@ -6,11 +6,13 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from . import db as dbm
+from .keys import norm
 from .pipeline import Pipeline
 
 log = logging.getLogger(__name__)
 STALE = timedelta(hours=6)          # 이보다 오래된 RUNNING 은 죽은 실행으로 봄
-MAX_NEW_ARTISTS = 50                # 공연 출연진에서 찾은 새 이름은 한 번에 이만큼만 (MusicBrainz 초당 1건)
+MAX_NEW_ARTISTS = 150               # 공연 출연진에서 찾은 새 이름은 한 번에 이만큼만 (MusicBrainz 초당 1건 · 11/23 50 → 150)
+MISS_RETRY = timedelta(days=30)     # 못 찾은 이름은 이만큼 지나야 다시 찾음 (MusicBrainz 검색 캐시와 같은 30일)
 
 
 def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
@@ -70,11 +72,12 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
 
 
 def _new_names(sessions, names: list[str]) -> list[str]:
-    """공연 출연진 중 아직 대표 키에 없는 이름"""
+    """공연 출연진 중 아직 대표 키에 없고, 30일 안에 못 찾은 적도 없는 이름"""
     out = []
     with sessions() as s:
+        missed = set(s.scalars(select(dbm.ArtistMiss.name_norm).where(dbm.ArtistMiss.checked_at > dbm.now() - MISS_RETRY)))
         for n in dict.fromkeys(names):
-            if dbm.lookup_artist_key(s, n) is None:
+            if dbm.lookup_artist_key(s, n) is None and norm(n)[:200] not in missed:
                 out.append(n)
             if len(out) >= MAX_NEW_ARTISTS:
                 break
