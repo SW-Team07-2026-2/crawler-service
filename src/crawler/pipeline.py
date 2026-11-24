@@ -26,10 +26,11 @@ from sqlalchemy import delete, select
 from . import db as dbm
 from . import images as imgs
 from .enums import ARTIST_COMPOSITIONS, ARTIST_GENDERS
-from .keys import content_hash, norm
+from .keys import HANGUL, LATIN, content_hash, norm
 from .llm import LlmSkip
 from .sources import discogs, gimbab, indistreet, kopis, musicbrainz
 from .studio import StudioRejected
+from .webtools import SearchQuota
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ WEB_ARTISTS_PER_RUN = 30               # 한 번 실행에 웹 검색할 아티�
 TICKET_SEARCHES = 10                   # 한 번 실행에 예매 오픈 찾기에 쓸 검색 크레딧 (11/22 8 → 10) — 나머지는 아티스트 조사에
 SEARCH_NAMES = 3                       # 김밥레코즈 검색어로 쓸 이름 수 (한글 이름 먼저)
 MAX_TRIES = 6                          # 다시 하기(retry)에서 이만큼 실패하면 더 하지 않음 — 행은 남겨 둠 (한도로 못 한 것은 세지 않음)
+ARTIST_ASK = 2                         # 아티스트마다 Gemini 에 묻는 것 — 11/23 장르 → 장르 + 한글 이름 · 11/24 + 인디 여부 (올리면 모든 아티스트를 한 번 다시 물음)
 
 
 class Pipeline:
@@ -394,24 +396,37 @@ class Pipeline:
             self.stats["discogs_no_link"] += 1          # MusicBrainz 에 Discogs 연결이 없으면 피지컬은 건드리지 않음
 
         source = {"mb": mb, "albums": [g["title"] for g in groups], "label": labels[0] if labels else None}
-        self._discover(key, mb, names, groups, source["label"])
-        # 장르는 아티스트가 같으면(id · 이름 · 별칭) 다시 묻지 않음 — 신보 하나로 장르가 흔들려 모든 앨범이 승인 대기로 돌아가는 것을 막음
-        identity = content_hash({k: mb[k] for k in ("mbid", "name", "aliases")})
+        # 인디 여부 · 장르 · 한글 이름은 아티스트가 같으면(id · 이름 · 별칭) 다시 묻지 않음 — 신보 하나로 장르가 흔들려 모든 앨범이 승인 대기로 돌아가는 것을 막음
+        identity = content_hash({**{k: mb[k] for k in ("mbid", "name", "aliases")}, "ask": ARTIST_ASK})
+        with self.sessions() as s:
+            item = self._item(s, "ARTIST", key)
+            prev = json.loads(item.payload_json) if item is not None else {"genres": [], "name": None}
+            asked_before = item is not None and item.input_hash == identity
+            prev_skip = item.error if item is not None and item.status == "SKIPPED" else None   # 전에 뺀 이유 (MAINSTREAM · HIPHOP)
+        if asked_before:
+            genres, name, judged, skip = prev["genres"], prev["name"], True, prev_skip
+        elif self.llm is None:
+            genres, name, judged, skip = prev["genres"], prev["name"], False, prev_skip   # 키가 생기면 그때 물음
+        else:
+            info = self._ask(mb, source)                 # None = 이번엔 못 물음 (거절 · 잘림 · 검색 한도) → 다음 실행에 다시
+            if info is None:
+                genres, name, judged, skip = prev["genres"], prev["name"], False, prev_skip
+            else:
+                genres, name, judged = info["genres"], _display_name(mb["name"], info["korean_name"]), True
+                skip = _skip_reason(info["relevance"], genres)
+        if skip:
+            self.stats[f"artist_skipped_{skip.lower()}"] += 1
+        else:
+            self._discover(key, mb, names, groups, source["label"])   # 뺀 아티스트는 신보 · 굿즈 · 웹 검색을 하지 않음
         with self.sessions() as s:
             found = self._found(s, key)
-            item = self._item(s, "ARTIST", key)
-            prev = json.loads(item.payload_json)["genres"] if item is not None else []
-            if item is not None and item.input_hash == identity:
-                genres, judged = prev, True
-            elif self.llm is None:
-                genres, judged = prev, False             # 키가 생기면 그때 물음
-            else:
-                asked_genres = self._genres(mb, source)  # None = 이번엔 못 물음 (거절 · 잘림) → 다음 실행에 다시
-                genres, judged = (prev, False) if asked_genres is None else (asked_genres, True)
+            name = name or mb["name"]
+            if name != mb["name"]:
+                self.stats["artist_korean_name"] += 1
             goods, goods_evidence = _goods(found["GOODS"])
             artist = {
                 "source": "crawler", "external_id": key,
-                "name": mb["name"][:100], "genres": genres,
+                "name": name[:100], "genres": genres,
                 "label": source["label"][:100] if source["label"] else None,
                 "debut_year": min(years) if years else None,
                 "profile_url": None,   # 공개 이미지 버킷이 정해지기 전까지 비움 (계약 3장)
@@ -423,8 +438,13 @@ class Pipeline:
             if goods_evidence:
                 artist["evidence"] = goods_evidence      # 출처 — 관리자 확인용 (Studio 가 Catalog 로 보낼 때 뺌)
             # 장르를 한 번도 정하지 못한 아티스트는 보내지 않고 기다림 (HOLD — 앨범도 아티스트가 간 뒤에) · 11/19 한도 소진으로 장르 없이 22팀이 갔음
+            # 11/24 indig 가 다루지 않는 아티스트(대중 · 힙합)는 SKIPPED — 보내지 않고 앨범도 만들지 않음 (공연은 send 에서 라인업으로 한 번 더)
             self._upsert(s, "ARTIST", key, artist, identity if judged else "not-judged",
-                         origin=f"https://musicbrainz.org/artist/{mb['mbid']}", status="READY" if judged or genres else "HOLD")
+                         origin=f"https://musicbrainz.org/artist/{mb['mbid']}",
+                         status="SKIPPED" if skip else "READY" if judged or genres else "HOLD", note=skip)
+            if skip:
+                s.commit()
+                return
 
             albums = []   # (앨범, 원본 해시, 원래 주소, Discogs 판본, 출처)
             for g in groups:
@@ -565,9 +585,24 @@ class Pipeline:
             out[f.kind].append({"site": f.site, "data": json.loads(f.data_json), "evidence": json.loads(f.evidence_json)})
         return out
 
-    def _genres(self, mb: dict, source: dict) -> list[str] | None:
+    def _ask(self, mb: dict, source: dict) -> dict | None:
+        legal = mb.get("legal_names", [])
+        web = []
+        # 11/24 영어 이름인데 쓸 수 있는 한글 별칭이 없으면 한글 표기를 웹 검색 조각에서 찾음 — 근거 없이 물으면 지어냄 (llm.artist_info)
+        # 본명은 본명으로 활동할 때만 씀 (MusicBrainz 이름이 본명 — Moon Sujin → 문수진)
+        usable = [a for a in mb["aliases"] if HANGUL.search(a) and (a not in legal or mb["name"] in legal)]
+        if self.searcher is not None and not getattr(self.llm, "exhausted", False) and LATIN.search(mb["name"]) and not usable:
+            try:
+                web = self.searcher.mentions(mb["name"])
+                self.stats["artist_name_search"] += 1
+            except SearchQuota:
+                self.stats["artist_name_search_deferred"] += 1     # 검색 한도 — 장르와 함께 다음 실행에 (None)
+                return None
+            except Exception as e:
+                self._fail("artist_name_search", mb["mbid"], e)
+                return None
         try:
-            return self.llm.artist_genres(mb["name"], mb["aliases"], source["albums"], source["label"])
+            return self.llm.artist_info(mb["name"], mb["aliases"], source["albums"], source["label"], legal, web)
         except LlmSkip as e:
             self.stats[f"artist_llm_{e}"] += 1
             return None
@@ -575,6 +610,7 @@ class Pipeline:
     # ---------- 전송 ----------
 
     def send(self):
+        self._skip_concerts_of_skipped_artists()
         if self.studio is None:
             self.stats["send_dry_run"] += 1
             return
@@ -587,6 +623,26 @@ class Pipeline:
                     items = [i for i in items if json.loads(i.payload_json)["artist_ref"]["external_id"] in sent]
             for i in range(0, len(items), limit):
                 self._post(type_, path, items[i:i + limit])
+
+    def _skip_concerts_of_skipped_artists(self):
+        """11/24 라인업에서 확인된 팀(우리가 아는 아티스트) 중 절반 넘게가 뺀 아티스트(대중 · 힙합)면 공연도 뺌 — 공연 판단(Gemini)이 놓친 것.
+        보내기 전(READY)과 이미 보낸 것(SENT) 모두. 이미 보낸 공연은 Studio 대기열에 남으므로 로그를 보고 관리자가 거절합니다."""
+        with self.sessions() as s:
+            links = dict(s.execute(select(dbm.ArtistLink.site_id, dbm.ArtistLink.key).where(dbm.ArtistLink.site == "name")).all())
+            artists = {i.key: (i.status, i.error) for i in s.scalars(select(dbm.Item).where(dbm.Item.type == "ARTIST"))}
+            for item in s.scalars(select(dbm.Item).where(dbm.Item.type == "CONCERT", dbm.Item.status.in_(("READY", "SENT")))):
+                keys = dict.fromkeys(links[norm(n)] for n in json.loads(item.payload_json)["concert"]["artistNames"]
+                                     if links.get(norm(n)) in artists)
+                skipped = [artists[k][1] for k in keys if artists[k][0] == "SKIPPED"]
+                if not keys or len(skipped) * 2 <= len(keys):
+                    continue
+                reason = f"LINEUP_{Counter(skipped).most_common(1)[0][0]}"
+                if item.status == "SENT":
+                    self.stats["concert_skipped_after_sent"] += 1
+                    log.info("crawl_concert_skipped_after_sent external_id=%s reason=%s", item.key, reason)
+                item.status, item.error, item.updated_at = "SKIPPED", reason, dbm.now()
+                self.stats["concert_skipped_lineup"] += 1
+            s.commit()
 
     def _post(self, type_: str, path: str, items: list):
         """한 묶음 전송. 400 이면 반으로 나눠 다시 — 잘못된 한 건만 FAILED 로 남깁니다."""
@@ -631,9 +687,9 @@ class Pipeline:
         if item is None:
             item = dbm.Item(type=type_, key=key)
             s.add(item)
-        elif item.source_hash == payload["source_hash"]:
+        elif item.source_hash == payload["source_hash"] and (item.status == "SKIPPED") == (status == "SKIPPED"):
             item.input_hash = input_hash
-            return item                       # 내용 그대로 — 상태(SENT · FAILED)도 그대로
+            return item                       # 내용 그대로 — 상태(SENT · FAILED)도 그대로 (빼기 · 다시 넣기는 내용이 같아도 바꿈 · 11/24)
         item.payload_json = json.dumps(payload, ensure_ascii=False)
         item.input_hash, item.source_hash, item.origin = input_hash, payload["source_hash"], origin[:1024]
         item.status, item.error, item.updated_at = status, note, dbm.now()
@@ -643,6 +699,21 @@ class Pipeline:
     def _fail(self, what, key, e):
         self.stats[f"{what}_error"] += 1
         log.warning("crawl_%s_failed item=%s error=%s", what, key, str(e)[:300])   # key= 는 로그 가림 필터가 비밀로 봄 (11/19)
+
+
+def _skip_reason(relevance: str, genres: list[str]) -> str | None:
+    """11/24 indig 가 다루지 않는 아티스트 — 대중 쪽(Gemini 판단) · 대표 장르(첫 번째)가 힙합 (사용자 결정 · docs/v2_인디_아티스트_기준.md)"""
+    if relevance == "MAINSTREAM":
+        return "MAINSTREAM"
+    if genres and genres[0] == "HIPHOP":
+        return "HIPHOP"
+    return None
+
+
+def _display_name(mb_name: str, korean: str | None) -> str:
+    """11/23 보내는 이름은 한글 — MusicBrainz 이름에 영어가 섞여 있으면 Gemini 가 고른 한글 활동명 (모르면 MusicBrainz 이름 그대로).
+    이미 한글뿐인 이름은 바꾸지 않음 (박성진 → 성진 같은 다른 표기로 흔들리지 않게)"""
+    return korean if korean and LATIN.search(mb_name) else mb_name
 
 
 def _same_album(title: str, titles: list[str]) -> str | None:
