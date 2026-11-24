@@ -480,6 +480,9 @@ class Pipeline:
             else:
                 genres, name, judged = info["genres"], _display_name(mb["name"], info["korean_name"]), True
                 skip = _skip_reason(info["relevance"], genres)
+        if skip and mb["mbid"] in self.settings.include_ids:   # 11/24 사용자가 넣기로 한 팀 (seeds/include.txt · QWER) — 판단과 상관없이 다룸
+            self.stats["artist_included"] += 1
+            skip = None
         if skip:
             self.stats[f"artist_skipped_{skip.lower()}"] += 1
         else:
