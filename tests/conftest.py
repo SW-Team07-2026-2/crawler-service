@@ -84,9 +84,17 @@ class FakeLlm:
 
 
 class FakeStudio:
-    def __init__(self, reject=None):
+    def __init__(self, reject=None, reviewed=None):
         self.posts: list[tuple[str, dict]] = []
         self.reject = reject                 # 이 external_id 가 묶음에 있으면 400
+        self.reviewed = reviewed             # GET /internal/crawl/reviewed 응답 · "down" 이면 실패
+        self.gets: list[str] = []
+
+    def get(self, path):
+        self.gets.append(path)
+        if self.reviewed == "down":
+            raise ConnectionError("studio down")
+        return self.reviewed or {"concerts": [], "artists": [], "albums": []}
 
     def post(self, path, body):
         from crawler.studio import StudioRejected

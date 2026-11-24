@@ -30,10 +30,17 @@ class Studio:
         return jwt.encode({"iss": "crawler", "aud": "studio", "exp": int(time.time()) + 300}, self.secret, algorithm="HS256")
 
     def post(self, path: str, body: dict) -> dict:
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        return self._call("POST", path, json.dumps(body, ensure_ascii=False).encode("utf-8"))
+
+    def get(self, path: str) -> dict:
+        return self._call("GET", path, None)
+
+    def _call(self, method: str, path: str, data: bytes | None) -> dict:
         for attempt in range(self.tries):
-            req = urllib.request.Request(self.base_url + path, data=data, method="POST", headers={
-                "Content-Type": "application/json", "X-Internal-Token": self.token()})
+            headers = {"X-Internal-Token": self.token()}
+            if data is not None:
+                headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(self.base_url + path, data=data, method=method, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=60) as res:
                     return json.loads(res.read())["result"]

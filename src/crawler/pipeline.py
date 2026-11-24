@@ -67,6 +67,26 @@ class Pipeline:
         self._loaded: set[str] = set()   # 이번 실행에서 본 MusicBrainz id
         self._indistreet: list[dict] = []
         self._web_left = WEB_ARTISTS_PER_RUN
+        self.reviewed: dict[tuple[str, str], str] = {}   # (CONCERT · ARTIST · ALBUM, external_id) → REJECTED · APPROVED · CHANGED (load_reviewed)
+
+    def load_reviewed(self):
+        """11/24 관리자가 처리한 후보 (Studio GET /internal/crawl/reviewed) — 실행 처음에 한 번.
+        거절한 공연 · 아티스트는 다시 찾지 않고(KOPIS 상세 · Gemini · MusicBrainz · 웹 검색), 관리자가 처리한 공연은 예매 오픈을 찾지 않음.
+        못 받으면 전처럼 전부 합니다 (실행은 계속)."""
+        if self.studio is None:
+            return
+        try:
+            result = self.studio.get("/internal/crawl/reviewed")
+        except Exception as e:
+            self._fail("reviewed_fetch", "studio", e)
+            return
+        for type_, field in (("CONCERT", "concerts"), ("ARTIST", "artists"), ("ALBUM", "albums")):
+            for row in result.get(field) or []:
+                self.reviewed[(type_, row["external_id"])] = row["status"]
+        self.stats["reviewed_rejected"] = sum(1 for v in self.reviewed.values() if v == "REJECTED")
+
+    def _rejected(self, type_: str, key: str | None) -> bool:
+        return self.reviewed.get((type_, key)) == "REJECTED"
 
     # ---------- 공연 ----------
 
@@ -87,6 +107,11 @@ class Pipeline:
         ids = kopis.list_ids(self.http, key, start, end)
         self._drop_unlisted(set(ids))
         for mt20id in [i for i in ids if i in retry] + [i for i in ids if i not in retry]:
+            if self._rejected("CONCERT", mt20id):      # 11/24 관리자가 거절한 공연 — 상세 · 정리(Gemini) · 출연진 찾기를 하지 않음
+                self.stats["concert_rejected_skip"] += 1
+                if mt20id in retry:
+                    self._retried("CONCERT", mt20id)
+                continue
             try:
                 detail = kopis.detail(self.http, key, mt20id)
             except Exception as e:  # 한 건 실패로 실행 전체를 멈추지 않음
@@ -223,6 +248,8 @@ class Pipeline:
             done = {p.url: p.body for p in s.scalars(select(dbm.RawPage).where(dbm.RawPage.source == "ticket"))}
             todo = []
             for i in s.scalars(select(dbm.Item).where(dbm.Item.type == "CONCERT", dbm.Item.status.in_(("READY", "SENT")))):
+                if ("CONCERT", i.key) in self.reviewed:   # 11/24 관리자가 처리한 공연 — 거절 · 등록(예매 오픈은 관리자가 넣음)
+                    continue
                 c = json.loads(i.payload_json)["concert"]
                 starts = c.get("startsAt")
                 if starts and datetime.fromisoformat(starts) < datetime.now(timezone.utc):
@@ -355,10 +382,13 @@ class Pipeline:
         """전에 찾은 아티스트를 MusicBrainz id 로 다시 봄 — 시드에 없고 공연에 다시 안 나와도 신보 · 바뀐 값이 들어옵니다.
         요청은 캐시(아티스트 · 앨범 목록 7일)가 지난 것만 나갑니다."""
         with self.sessions() as s:
-            mbids = s.scalars(select(dbm.ArtistLink.site_id).where(dbm.ArtistLink.site == "musicbrainz")
+            links = s.execute(select(dbm.ArtistLink.site_id, dbm.ArtistLink.key).where(dbm.ArtistLink.site == "musicbrainz")
                               .order_by(dbm.ArtistLink.id)).all()
-        for mbid in mbids:
+        for mbid, key in links:
             if mbid in self._loaded:
+                continue
+            if self._rejected("ARTIST", key):            # 11/24 관리자가 거절한 아티스트
+                self.stats["artist_rejected_skip"] += 1
                 continue
             try:
                 self._load(musicbrainz.artist(self.http, mbid))
@@ -368,6 +398,12 @@ class Pipeline:
 
     def _load(self, mb: dict, asked: str | None = None):
         self._loaded.add(mb["mbid"])
+        if self.reviewed:
+            with self.sessions() as s:
+                known = s.scalar(select(dbm.ArtistLink.key).where(dbm.ArtistLink.site == "musicbrainz", dbm.ArtistLink.site_id == mb["mbid"]))
+            if self._rejected("ARTIST", known):          # 11/24 관리자가 거절한 아티스트 — 앨범 · 판단(Gemini) · 웹 검색을 하지 않음
+                self.stats["artist_rejected_skip"] += 1
+                return
         groups = musicbrainz.release_groups(self.http, mb["mbid"])
         if not groups:
             # 앨범이 하나도 없으면 만들지 않음 — 작사가 · 배우처럼 별칭만 같은 사람이 걸리는 것을 막음 (11/18 이지민 → 이하진)

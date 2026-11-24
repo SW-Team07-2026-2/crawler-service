@@ -42,6 +42,7 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
             log.exception("crawl_stage_failed kind=%s run=%s stage=%s", kind, run_id, name)
             return None
 
+    pipeline.load_reviewed()   # 관리자가 처리한 후보 — 거절한 것은 다시 찾지 않음 (11/24 · 못 받으면 전처럼 · 예외를 내지 않음)
     found = stage("공연", pipeline.concerts) or []
     concerts_failed = bool(errors)
     if kind == "dawn":
