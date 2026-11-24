@@ -29,3 +29,37 @@ def test_send_posts_text_and_never_raises():
         raise OSError("down")
     notify.send("https://hooks.slack.com/services/x", "안녕", post=boom)   # 예외 없음
     notify.send(None, "안녕", post=boom)                                   # 주소 없으면 부르지 않음
+
+
+def test_error_codes_are_short_and_say_what_failed():
+    import urllib.error
+    from crawler.llm import LlmSkip
+    from crawler.studio import StudioRejected
+    from crawler.webtools import SearchQuota
+    assert notify.error_code(StudioRejected(400, '{"isSuccess":false,"code":"INVALID_REQUEST"}')) == "Studio 400 INVALID_REQUEST"
+    assert notify.error_code(StudioRejected(401, "")) == "Studio 401"
+    assert notify.error_code(RuntimeError("GET https://www.kopis.or.kr/x?service=*** → 404")) == "HTTP 404"
+    assert notify.error_code(LlmSkip("unavailable")) == "Gemini unavailable"
+    assert notify.error_code(SearchQuota()) == "검색 한도"
+    assert notify.error_code(TimeoutError("read")) == "시간 초과"
+    assert notify.error_code(urllib.error.URLError(ConnectionRefusedError())) == "연결 실패 (ConnectionRefusedError)"
+    assert notify.error_code(KeyError("x")) == "KeyError"
+
+
+def test_message_lists_where_errors_happened_with_codes_and_examples():
+    result = {"run": 9, "status": "FAILED", "error": "공연 [HTTP 400]: RuntimeError: …", "input_tokens": 1, "output_tokens": 2,
+              "stage_errors": ["공연 [HTTP 400]: RuntimeError: GET https://www.kopis.or.kr/openApi/restful/pblprfr?service=SECRET → 400 <dbs>"],
+              "failures": {
+                  "gimbab": {"count": 1, "codes": {"HTTP 404": 1}, "samples": [("Silica Gel", "GET https://www.gimbabrecords.com/x → 404")]},
+                  "concert_image": {"count": 5, "codes": {"HTTP 404": 4, "시간 초과": 1},
+                                    "samples": [("PF1 http://www.kopis.or.kr/a.gif", "GET … → 404")] * 5}},
+              "stats": {"gimbab_error": 1, "concert_image_error": 5, "concert_llm_unavailable": 41, "artist_llm_quota": 2}}
+    lines = notify.message("dawn", result, 90).splitlines()
+    assert lines[1] == "단계 실패 1건"
+    assert lines[2] == ("• 공연 [HTTP 400]: RuntimeError: GET https://www.kopis.or.kr/openApi/restful/pblprfr?service=*** → 400 &lt;dbs&gt;")
+    i = lines.index("항목 오류 6건 (어디서 · 코드 · 예시)")
+    assert lines[i + 1] == "• 공연 포스터 · 소개 이미지 (concert_image) 5건 — HTTP 404 ×4 · 시간 초과 ×1"   # 많은 순
+    assert lines[i + 2] == "    예) PF1 http://www.kopis.or.kr/a.gif: GET … → 404"
+    assert lines[i + 5] == "• 김밥레코즈 (gimbab) 1건 — HTTP 404 ×1"                                         # 예시는 3개까지
+    assert "Gemini 로 못 한 것 (다음 실행에): artist_llm_quota 2 · concert_llm_unavailable 41" in lines
+    assert all("SECRET" not in line for line in lines)

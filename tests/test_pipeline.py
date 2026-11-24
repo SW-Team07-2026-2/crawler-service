@@ -856,7 +856,7 @@ def test_failed_stage_does_not_stop_the_rest_of_the_run(sessions):
     w.add("pblprfr?service=KEY", "<html><body>Bad Request</body></html>", status=400)
     out = runner.run("dawn", sessions, pipeline(sessions, w, studio), ["검정치마"])
     assert out["status"] == "FAILED"
-    assert out["error"].startswith("공연: RuntimeError: GET ") and "service=***" in out["error"]
+    assert out["error"].startswith("공연 [HTTP 400]: RuntimeError: GET ") and "service=***" in out["error"]
     assert out["error"].endswith("→ 400 <html><body>Bad Request</body></html>")       # 응답 본문도 남김
     assert [path for path, _ in studio.posts] == [ARTISTS, ALBUMS]                   # 공연 말고는 보냄
     with sessions() as s:
@@ -1040,6 +1040,8 @@ def test_rejected_concerts_and_artists_are_not_searched_again(sessions):
     w.calls.clear()
     out = runner.run("lunch", sessions, p, [])
     assert out["status"] == "DONE" and out["stats"]["reviewed_fetch_error"] == 1
+    assert out["failures"]["reviewed_fetch"] == {"count": 1, "codes": {"ConnectionError": 1}, "samples": [("studio", "studio down")]}
+    assert out["failures"]["concert_facility"]["codes"] == {"HTTP 404": 1}            # 알림에 보일 코드 (11/24)
     assert any("prfplc/FC100" in u for u in w.calls)                             # 못 받으면 전처럼
 
 
