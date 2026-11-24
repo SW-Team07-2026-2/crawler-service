@@ -25,6 +25,7 @@ from sqlalchemy import delete, select
 
 from . import db as dbm
 from . import images as imgs
+from . import notify
 from .enums import ARTIST_COMPOSITIONS, ARTIST_GENDERS
 from .keys import HANGUL, LATIN, content_hash, norm
 from .llm import LlmSkip
@@ -67,6 +68,7 @@ class Pipeline:
         self._loaded: set[str] = set()   # 이번 실행에서 본 MusicBrainz id
         self._indistreet: list[dict] = []
         self._web_left = WEB_ARTISTS_PER_RUN
+        self.failures: dict[str, dict] = {}   # 11/24 알림용 — what → {count, codes: {코드: 수}, samples: [(항목, 내용)] 몇 개}
         self.reviewed: dict[tuple[str, str], str] = {}   # (CONCERT · ARTIST · ALBUM, external_id) → REJECTED · APPROVED · CHANGED (load_reviewed)
 
     def load_reviewed(self):
@@ -734,6 +736,11 @@ class Pipeline:
 
     def _fail(self, what, key, e):
         self.stats[f"{what}_error"] += 1
+        f = self.failures.setdefault(what, {"count": 0, "codes": Counter(), "samples": []})
+        f["count"] += 1
+        f["codes"][notify.error_code(e)] += 1
+        if len(f["samples"]) < notify.SAMPLES:
+            f["samples"].append((str(key)[:120], str(e)[:300]))
         log.warning("crawl_%s_failed item=%s error=%s", what, key, str(e)[:300])   # key= 는 로그 가림 필터가 비밀로 봄 (11/19)
 
 
