@@ -67,6 +67,7 @@ class Pipeline:
         self.stats: Counter = Counter()
         self._loaded: set[str] = set()   # 이번 실행에서 본 MusicBrainz id
         self._indistreet: list[dict] = []
+        self._contexts: dict[str, dict] = {}   # 11/24 출연진 이름 → 나온 공연 (같은 이름 아티스트가 여럿일 때 고르는 근거)
         self._web_left = WEB_ARTISTS_PER_RUN
         self.failures: dict[str, dict] = {}   # 11/24 알림용 — what → {count, codes: {코드: 수}, samples: [(항목, 내용)] 몇 개}
         self.reviewed: dict[tuple[str, str], str] = {}   # (CONCERT · ARTIST · ALBUM, external_id) → REJECTED · APPROVED · CHANGED (load_reviewed)
@@ -151,6 +152,7 @@ class Pipeline:
                             s.commit()
                             self.stats["concert_dates_fixed"] += 1
                         names += payload["concert"]["artistNames"]
+                        self._remember_context(payload["concert"])
             if same:
                 if mt20id in retry:
                     self._retried("CONCERT", mt20id)         # 상세를 못 받았던 공연 — 이번엔 받음
@@ -189,8 +191,34 @@ class Pipeline:
             self.stats["concert_indie" if indie else "concert_skipped"] += 1
             if indie:
                 names += concert["artistNames"]
+                self._remember_context(concert)
         self._tickets()
         return names
+
+    def _remember_context(self, concert: dict):
+        context = {"title": concert.get("title"), "venueName": concert.get("venueName"), "startsAt": concert.get("startsAt"),
+                   "lineup": concert.get("artistNames"), "description": (concert.get("description") or "")[:1200]}
+        for n in concert.get("artistNames") or []:
+            self._contexts.setdefault(norm(n), context)
+
+    def _pick(self, name: str, candidates: list[dict]) -> str | None:
+        """11/24 같은 이름의 한국 아티스트가 여럿 (정우: NCT · 인디 싱어송라이터 · 배우 · TREASURE) — 이 이름이 나온 공연을 보고 Gemini 가 고름.
+        나온 공연을 모르면(시드) · Gemini 가 못 고르면 None = 만들지 않음. Gemini 한도 · 503 이면 LlmSkip → 다음 실행에 다시 (artists 의 retry)."""
+        self.stats["artist_same_name"] += 1
+        context = self._contexts.get(norm(name))
+        if context is None or self.llm is None:
+            self.stats["artist_same_name_unresolved"] += 1
+            log.info("crawl_artist_same_name name=%s candidates=%s context=none", name, [c["id"] for c in candidates])
+            return None
+        if getattr(self.llm, "exhausted", False):
+            raise LlmSkip(getattr(self.llm, "stop_reason", "quota"))
+        options = [{"id": c["id"], "name": c.get("name"), "disambiguation": c.get("disambiguation"), "type": c.get("type"),
+                    "gender": c.get("gender"), "aliases": [a.get("name") for a in c.get("aliases", [])][:6],
+                    "releases": [g["title"] for g in musicbrainz.release_groups(self.http, c["id"])][-8:]} for c in candidates]
+        chosen = self.llm.pick_artist(name, options, context)
+        self.stats["artist_same_name_picked" if chosen else "artist_same_name_unresolved"] += 1
+        log.info("crawl_artist_same_name name=%s candidates=%s chosen=%s", name, [c["id"] for c in candidates], chosen)
+        return chosen
 
     def _known_names(self) -> list[tuple[str, str]]:
         """우리가 아는 아티스트 (정규화한 이름 · 별칭 → 대표 이름) — 공연 글에 보이는 것만 Gemini 에 힌트로"""
@@ -313,7 +341,7 @@ class Pipeline:
                 continue
             seen.add(norm(name))
             try:
-                mb = musicbrainz.find_artist(self.http, name.strip())
+                mb = musicbrainz.find_artist(self.http, name.strip(), pick=lambda found, n=name.strip(): self._pick(n, found))
                 if mb is None:
                     self.stats["artist_not_found"] += 1   # 동명이인 · 표기 차이로 애매하면 만들지 않음
                     log.info("crawl_artist_not_found name=%s", name)

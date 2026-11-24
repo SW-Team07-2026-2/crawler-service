@@ -17,22 +17,29 @@ def _get(http, path: str, days: int) -> dict:
     return json.loads(http.get("musicbrainz", f"{API}/{path}", max_age=timedelta(days=days)))
 
 
-def find_artist(http, name: str) -> dict | None:
-    """이름으로 찾기 — 점수 95 이상이고 이름(또는 별칭)이 정규화해서 같고 한국 아티스트인 것만. 애매하면 None (억지로 고르지 않음).
+def find_artist(http, name: str, pick=None) -> dict | None:
+    """이름으로 찾기 — 이름(또는 별칭)이 정규화해서 같은 한국 아티스트. 그중 하나는 점수 95 이상이어야 함.
+    11/24 같은 이름의 한국 아티스트가 둘 이상이면(정우: NCT · 인디 싱어송라이터 · 배우 · TREASURE — 전에는 점수 높은 NCT 를 골랐음)
+    pick(후보 검색 결과 목록) → 고른 id 로 정하고, pick 이 없거나 못 고르면 None (억지로 고르지 않음).
     띄어쓰기가 다르면 검색이 못 찾습니다 (브로콜리너마저 ↔ 브로콜리 너마저) — 시드에는 MusicBrainz 표기나 영문 이름을 씁니다."""
     safe = name.replace('"', " ")
     q = quote(f'artist:"{safe}" OR alias:"{safe}"')         # 한글 이름이 별칭에만 있는 경우가 많음 (SE SO NEON · 새소년)
     found = _get(http, f"artist?query={q}&fmt=json&limit=5", days=30).get("artists", [])
     target = norm(name)
+    same = []
     for a in found:
         names = {norm(a.get("name", "")), norm(a.get("sort-name", ""))} | {norm(x.get("name", "")) for x in a.get("aliases", [])}
-        if a.get("score", 0) < 95 or target not in names:
+        if target not in names:
             continue
         # 나라가 비어 있고 도시만 있는 경우가 있음 (Say Sue Me → Busan) — 그때는 지역을 따라 올라가 봄
-        korean = a.get("country") == "KR" or (a.get("country") is None and _in_korea(http, a.get("area") or a.get("begin-area")))
-        if korean:
-            return artist(http, a["id"])
-    return None
+        if a.get("country") == "KR" or (a.get("country") is None and _in_korea(http, a.get("area") or a.get("begin-area"))):
+            same.append(a)
+    if not any(a.get("score", 0) >= 95 for a in same):
+        return None
+    if len(same) == 1:
+        return artist(http, same[0]["id"])
+    chosen = pick(same) if pick else None
+    return artist(http, chosen) if chosen in {a["id"] for a in same} else None
 
 
 def bands_of(http, person: str) -> list[str]:
