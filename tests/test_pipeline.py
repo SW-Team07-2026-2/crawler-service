@@ -1094,3 +1094,15 @@ def test_same_name_artist_without_a_concert_is_not_guessed(sessions):
                                                 llm=llm, studio=FakeStudio()), ["정우"])
     assert "pick:정우" not in llm.calls and out["stats"]["artist_same_name_unresolved"] == 1
     assert not [i for i in items(sessions, "ARTIST").values() if json.loads(i.payload_json)["name"] == "정우"]
+
+
+def test_artists_in_the_include_list_are_kept_even_if_judged_mainstream(sessions):
+    """11/24 사용자가 넣기로 한 팀(seeds/include.txt · QWER) — Gemini 가 대중으로 봐도 보내고 앨범 · 공연도 그대로"""
+    w, studio = web(), FakeStudio()
+    llm = FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres={"검정치마": ["INDIE_ROCK"], "Silica Gel": ["INDIE_ROCK"]},
+                  mainstream={"검정치마", "Silica Gel"})
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY", include_ids=frozenset({"sg"})),
+                                                llm=llm, studio=studio), ["검정치마"])
+    status = {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()}
+    assert status == {"검정치마": "SKIPPED", "Silica Gel": "SENT"}
+    assert out["stats"]["artist_included"] == 1 and items(sessions, "CONCERT")["PF100"].status == "SENT"
