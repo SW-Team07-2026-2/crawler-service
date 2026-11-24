@@ -7,6 +7,7 @@ from sqlalchemy import select, update
 from crawler import db as dbm
 from crawler import runner
 from crawler.pipeline import Pipeline, fit_kopis_dates, to_concert
+from crawler.webtools import SearchQuota
 
 from conftest import FakeLlm, FakeStudio, FakeWeb, make_http, settings
 from test_sources import KOPIS_DETAIL
@@ -108,6 +109,110 @@ def test_second_run_sends_nothing_and_skips_llm_then_only_changed_album_goes(ses
     assert [(path, [i["title"] for i in body["items"]]) for path, body in studio.posts] == [(ALBUMS, ["201"])]
     assert len(studio.posts[0][1]["items"][0]["tracks"]) == 3
     assert len(llm.calls) == llm_calls                              # 아티스트 원본(이름 · 앨범 목록 · 레이블)은 그대로
+
+
+def test_english_name_goes_as_the_korean_name_and_artists_judged_before_are_asked_once_more(sessions):
+    """11/23 영어 이름(Silica Gel)은 Gemini 가 고른 한글 활동명으로 · 한글뿐인 이름(검정치마)은 그대로.
+    한글 이름을 묻기 전에 장르만 정한 아티스트는 다음 실행에 한 번 다시 물음 (ARTIST_ASK) · 못 물으면 전에 보낸 이름 그대로"""
+    from crawler.llm import LlmSkip
+
+    def set_old_input():
+        with sessions() as s:
+            s.execute(update(dbm.Item).where(dbm.Item.type == "ARTIST").values(input_hash="genres-only"))
+            s.commit()
+
+    w = web()
+    genres = {"검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC"]}
+    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio(), FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres)),
+               ["검정치마"])
+    set_old_input()
+
+    studio = FakeStudio()
+    llm = FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres, names={"Silica Gel": "실리카겔", "검정치마": "검은 치마"})
+    out = runner.run("dawn", sessions, pipeline(sessions, w, studio, llm), ["검정치마"])
+    assert sorted(c for c in llm.calls if c.startswith("artist:")) == ["artist:Silica Gel", "artist:검정치마"]
+    assert [(path, [i["name"] for i in body["items"]]) for path, body in studio.posts] == [(ARTISTS, ["실리카겔"])]
+    assert out["stats"]["artist_korean_name"] == 1                  # 앨범은 장르가 같아 다시 가지 않음
+
+    class NoQuota(FakeLlm):
+        def artist_info(self, *args, **kwargs):
+            raise LlmSkip("quota")
+
+    set_old_input()
+    studio = FakeStudio()
+    runner.run("dawn", sessions, pipeline(sessions, w, studio, NoQuota({"PF100": INDIE, "PF200": MAINSTREAM})), ["검정치마"])
+    assert studio.posts == []                                        # 영어 이름으로 되돌아가지 않음
+    assert {json.loads(i.payload_json)["name"] for i in items(sessions, "ARTIST").values()} == {"검정치마", "실리카겔"}
+
+
+def test_english_name_without_a_hangul_alias_is_looked_up_once_in_web_search(sessions):
+    """11/24 한글 별칭이 없는 영어 이름만 검색 1번 (조각을 Gemini 에 근거로) — 한글 이름(검정치마) · 한글 별칭이 있는 팀은 검색 안 함.
+    검색 한도면 장르와 함께 다음 실행에 (영어 이름으로 보내지 않음)"""
+    def english_only(w):
+        w.add("artist/sg?", {"id": "sg", "name": "Silica Gel", "aliases": [{"name": "Silica Gel"}]})
+        return w
+
+    genres = {"검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC"]}
+    w = english_only(web())
+    quota = FakeSearcher(mentions="quota")
+    studio = FakeStudio()
+    llm = FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres, names={"Silica Gel": "실리카겔"})
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm,
+                                                studio=studio, searcher=quota), ["검정치마"])
+    assert ("mentions", "Silica Gel") in quota.calls and ("mentions", "검정치마") not in quota.calls
+    assert "artist:Silica Gel" not in llm.calls and out["stats"]["artist_name_search_deferred"] == 1
+    assert {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()} == {
+        "검정치마": "SENT", "Silica Gel": "HOLD"}                       # 장르 · 이름을 못 정해 기다림
+    assert [i["name"] for path, body in studio.posts if path == ARTISTS for i in body["items"]] == ["검정치마"]
+
+    found = FakeSearcher(mentions={"Silica Gel": ["실리카겔 (Silica Gel) | 밴드 실리카겔의 정규 2집"]})
+    studio = FakeStudio()
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, english_only(w)), settings(kopis_key="KEY"),
+                                                llm=llm, studio=studio, searcher=found), ["검정치마"])
+    assert [c for c in found.calls if c[0] == "mentions"] == [("mentions", "Silica Gel")]
+    assert llm.web["Silica Gel"] == ["실리카겔 (Silica Gel) | 밴드 실리카겔의 정규 2집"] and llm.web["검정치마"] == []
+    assert [i["name"] for path, body in studio.posts if path == ARTISTS for i in body["items"]] == ["실리카겔"]
+    assert out["stats"]["artist_name_search"] == 1
+
+
+def test_mainstream_and_hiphop_artists_are_skipped_without_albums_web_search_or_their_concert(sessions):
+    """11/24 indig 가 다루지 않는 아티스트 — 대중 쪽(Gemini) · 대표 장르가 힙합 → 보내지 않고 앨범 · 웹 검색도 없음.
+    라인업 팀 절반 넘게가 뺀 팀이면 공연(PF100 · 실리카겔 단독)도 보내지 않음"""
+    w, studio, search = web(), FakeStudio(), FakeSearcher()
+    llm = FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres={"검정치마": ["INDIE_ROCK"], "Silica Gel": ["HIPHOP", "RNB_SOUL"]},
+                  mainstream={"검정치마"})
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm,
+                                                studio=studio, searcher=search), ["검정치마"])
+    assert out["status"] == "DONE" and studio.posts == []
+    assert {json.loads(i.payload_json)["name"]: (i.status, i.error) for i in items(sessions, "ARTIST").values()} == {
+        "검정치마": ("SKIPPED", "MAINSTREAM"), "Silica Gel": ("SKIPPED", "HIPHOP")}
+    assert items(sessions, "ALBUM") == {} and not [c for c in search.calls if c[0] in ("releases", "goods")]
+    assert (items(sessions, "CONCERT")["PF100"].status, items(sessions, "CONCERT")["PF100"].error) == ("SKIPPED", "LINEUP_HIPHOP")
+    st = out["stats"]
+    assert (st["artist_skipped_mainstream"], st["artist_skipped_hiphop"], st["concert_skipped_lineup"]) == (1, 1, 1)
+
+
+def test_artist_sent_before_and_now_judged_mainstream_is_skipped_once_and_stays_skipped(sessions):
+    """이미 보낸 팀을 다시 물어(ARTIST_ASK) 대중 쪽이면 내용이 같아도 SKIPPED · 그 팀 공연도 (Studio 대기열은 관리자가 거절).
+    한 번 정하면 다시 묻지 않고 SKIPPED 그대로"""
+    w = web()
+    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio()), ["검정치마"])
+    with sessions() as s:
+        s.execute(update(dbm.Item).where(dbm.Item.type == "ARTIST").values(input_hash="genres-only"))
+        s.commit()
+    genres = {"검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC", "INDIE_ROCK"]}
+    studio = FakeStudio()
+    out = runner.run("dawn", sessions, pipeline(sessions, w, studio, FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres,
+                                                                          mainstream={"Silica Gel"})), ["검정치마"])
+    assert studio.posts == []
+    artists = {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()}
+    assert artists == {"검정치마": "SENT", "Silica Gel": "SKIPPED"}
+    assert items(sessions, "CONCERT")["PF100"].status == "SKIPPED" and out["stats"]["concert_skipped_after_sent"] == 1
+
+    llm = FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres)          # 이번엔 INDIE 라고 해도 다시 묻지 않음
+    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio(), llm), ["검정치마"])
+    assert "artist:Silica Gel" not in llm.calls
+    assert {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()}["Silica Gel"] == "SKIPPED"
 
 
 def test_known_artist_is_refreshed_without_seed_or_concert_and_genres_stay(sessions):
@@ -574,8 +679,14 @@ STORE_URL = "https://store.example/silica-tee"
 
 
 class FakeSearcher:
-    def __init__(self, releases=None, goods=None):
-        self.r, self.g, self.calls = releases or {}, goods or {}, []
+    def __init__(self, releases=None, goods=None, mentions=None):
+        self.r, self.g, self.m, self.calls = releases or {}, goods or {}, mentions or {}, []
+
+    def mentions(self, name):
+        self.calls.append(("mentions", name))
+        if self.m == "quota":
+            raise SearchQuota("budget")
+        return self.m.get(name, [])
 
     def releases(self, artist):
         self.calls.append(("releases", artist["name"]))
@@ -745,7 +856,7 @@ def test_failed_stage_does_not_stop_the_rest_of_the_run(sessions):
     w.add("pblprfr?service=KEY", "<html><body>Bad Request</body></html>", status=400)
     out = runner.run("dawn", sessions, pipeline(sessions, w, studio), ["검정치마"])
     assert out["status"] == "FAILED"
-    assert out["error"].startswith("공연: RuntimeError: GET ") and "service=***" in out["error"]
+    assert out["error"].startswith("공연 [HTTP 400]: RuntimeError: GET ") and "service=***" in out["error"]
     assert out["error"].endswith("→ 400 <html><body>Bad Request</body></html>")       # 응답 본문도 남김
     assert [path for path, _ in studio.posts] == [ARTISTS, ALBUMS]                   # 공연 말고는 보냄
     with sessions() as s:
@@ -834,7 +945,7 @@ def test_artist_without_genres_waits_until_genres_are_judged(sessions):
     from crawler.llm import LlmSkip
 
     class NoQuota(FakeLlm):
-        def artist_genres(self, name, aliases, albums, label):
+        def artist_info(self, name, aliases, albums, label, legal_names=(), web=()):
             raise LlmSkip("quota")
 
     w, studio = web(), FakeStudio()
@@ -901,3 +1012,97 @@ def test_concerts_sent_before_the_date_check_are_fixed_without_asking_gemini_aga
     c = json.loads(items(sessions, "CONCERT")["PF100"].payload_json)["concert"]
     assert c["startsAt"] == "2026-12-12T18:00:00+09:00" and c["reviewNotes"][0].startswith("검수 필요")
     assert items(sessions, "CONCERT")["PF100"].status == "READY"                   # 다시 보냄
+
+
+def test_rejected_concerts_and_artists_are_not_searched_again(sessions):
+    """11/24 관리자가 거절한 공연 · 아티스트는 다시 찾지 않음 (KOPIS 상세 · Gemini · MusicBrainz) · 관리자가 처리한 공연은 예매 오픈도 찾지 않음.
+    Studio 에서 목록을 못 받으면 전처럼 전부"""
+    w = web()
+    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio()), ["검정치마"])
+    keys = {json.loads(i.payload_json)["name"]: k for k, i in items(sessions, "ARTIST").items()}
+
+    w.calls.clear()
+    llm = FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM},
+                  genres={"검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC", "INDIE_ROCK"]})
+    studio = FakeStudio(reviewed={"concerts": [{"source": "kopis", "external_id": "PF100", "status": "REJECTED"}],
+                                  "artists": [{"source": "crawler", "external_id": keys["검정치마"], "status": "REJECTED"}],
+                                  "albums": []})
+    p = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm, studio=studio)
+    out = runner.run("dawn", sessions, p, ["검정치마"])
+    st = out["stats"]
+    assert out["status"] == "DONE" and studio.gets == ["/internal/crawl/reviewed"]
+    assert not any("prfplc/FC100" in u for u in w.calls)                        # 거절한 공연은 상세 · 공연장을 보지 않음
+    assert (st["concert_rejected_skip"], st["artist_rejected_skip"], st["reviewed_rejected"]) == (1, 1, 2)
+    assert st["artist_refreshed"] == 1                                           # 다시 보기는 거절 안 한 실리카겔만
+
+    down = FakeStudio(reviewed="down")
+    p = pipeline(sessions, w, down)
+    w.calls.clear()
+    out = runner.run("lunch", sessions, p, [])
+    assert out["status"] == "DONE" and out["stats"]["reviewed_fetch_error"] == 1
+    assert out["failures"]["reviewed_fetch"] == {"count": 1, "codes": {"ConnectionError": 1}, "samples": [("studio", "studio down")]}
+    assert out["failures"]["concert_facility"]["codes"] == {"HTTP 404": 1}            # 알림에 보일 코드 (11/24)
+    assert any("prfplc/FC100" in u for u in w.calls)                             # 못 받으면 전처럼
+
+
+def test_concerts_handled_by_admins_skip_the_ticket_open_search(sessions):
+    w = web()
+    search = FakeTicketSearch(None)
+    studio = FakeStudio(reviewed={"concerts": [{"source": "kopis", "external_id": "PF100", "status": "APPROVED"}],
+                                  "artists": [], "albums": []})
+    p = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM}),
+                 studio=studio, searcher=search)
+    runner.run("lunch", sessions, p, [])
+    assert search.asked == []                          # 등록한 공연 — 예매 오픈은 관리자가 넣음 (KOPIS 상세는 바뀜 확인용으로 계속)
+    assert items(sessions, "CONCERT")["PF100"].status == "SENT"
+
+
+def _same_name_web():
+    w = web()
+    w.add(quote("정우"), {"artists": [
+        {"id": "nct", "name": "정우", "score": 100, "country": "KR", "disambiguation": "NCT", "gender": "male", "aliases": []},
+        {"id": "jw", "name": "정우", "score": 74, "country": "KR", "disambiguation": "CTRSOUND", "gender": "female",
+         "aliases": [{"name": "JUNGWOO"}]}]})
+    w.add("artist/jw?", {"id": "jw", "name": "정우", "type": "Person", "gender": "Female", "aliases": [{"name": "JUNGWOO"}]})
+    w.add("artist/nct?", {"id": "nct", "name": "정우", "gender": "Male", "aliases": []})
+    w.add("release-group?artist=jw", {"release-groups": [{"id": "rgJ", "title": "철의 삶", "primary-type": "Album", "first-release-date": "2024-04-01"}]})
+    w.add("release-group?artist=nct", {"release-groups": [{"id": "rgN", "title": "SUGAR", "primary-type": "Single", "first-release-date": "2025-11-28"}]})
+    w.add("release?release-group=rgJ", {"releases": [{"date": "2024-04-01", "media": [{"tracks": [{"title": "철의 삶"}]}],
+                                                       "label-info": [{"label": {"name": "CTRSOUND"}}]}]})
+    return w
+
+
+def test_same_name_artist_is_picked_from_the_concert_it_came_from(sessions):
+    """11/24 정우 — 같은 이름의 한국 아티스트(NCT · 인디 싱어송라이터)가 여럿이면 이 이름이 나온 공연을 보고 Gemini 가 고름
+    (전에는 점수 높은 NCT 정우로 이어 대중으로 빠지고 그 단독 공연까지 라인업 확인으로 빠졌음)"""
+    solo = {**INDIE, "title": "정우 단독 공연", "artistNames": ["정우"], "venueName": "NOL 씨어터 합정"}
+    llm = FakeLlm(concerts={"PF100": solo, "PF200": MAINSTREAM}, genres={"정우": ["FOLK"]}, picks={"정우": "jw"})
+    studio = FakeStudio()
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, _same_name_web()), settings(kopis_key="KEY"),
+                                                llm=llm, studio=studio), [])
+    ids, context = llm.picked["정우"]
+    assert ids == ["nct", "jw"] and context["title"] == "정우 단독 공연" and context["venueName"] == "NOL 씨어터 합정"
+    assert [(a["name"], a["gender"]) for path, body in studio.posts if path == ARTISTS for a in body["items"]] == [("정우", "FEMALE")]
+    assert out["stats"]["artist_same_name_picked"] == 1
+    assert items(sessions, "CONCERT")["PF100"].status == "SENT"                # 단독 공연도 그대로
+
+
+def test_same_name_artist_without_a_concert_is_not_guessed(sessions):
+    """시드처럼 나온 공연을 모르는 이름은 고를 근거가 없어 만들지 않음 (Gemini 도 묻지 않음)"""
+    llm = FakeLlm(concerts={"PF100": {**INDIE, "artistNames": []}, "PF200": MAINSTREAM}, picks={"정우": "jw"})
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, _same_name_web()), settings(kopis_key="KEY"),
+                                                llm=llm, studio=FakeStudio()), ["정우"])
+    assert "pick:정우" not in llm.calls and out["stats"]["artist_same_name_unresolved"] == 1
+    assert not [i for i in items(sessions, "ARTIST").values() if json.loads(i.payload_json)["name"] == "정우"]
+
+
+def test_artists_in_the_include_list_are_kept_even_if_judged_mainstream(sessions):
+    """11/24 사용자가 넣기로 한 팀(seeds/include.txt · QWER) — Gemini 가 대중으로 봐도 보내고 앨범 · 공연도 그대로"""
+    w, studio = web(), FakeStudio()
+    llm = FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres={"검정치마": ["INDIE_ROCK"], "Silica Gel": ["INDIE_ROCK"]},
+                  mainstream={"검정치마", "Silica Gel"})
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY", include_ids=frozenset({"sg"})),
+                                                llm=llm, studio=studio), ["검정치마"])
+    status = {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()}
+    assert status == {"검정치마": "SKIPPED", "Silica Gel": "SENT"}
+    assert out["stats"]["artist_included"] == 1 and items(sessions, "CONCERT")["PF100"].status == "SENT"

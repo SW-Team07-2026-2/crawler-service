@@ -28,6 +28,7 @@ PAGE_CHARS = 15000     # open_page 로 보여 줄 페이지 본문 길이 (상�
 RESULT_CHARS = 3000    # 검색 결과마다 보여 줄 본문 앞부분 (검색하면 결과 페이지를 모두 열어 둠 · 11/18 사용자 지시 "싹 찾기")
 KEEP_CHARS = 200000    # 확인용으로 들고 있는 본문 길이 (저장하지 않음)
 QUOTE_CHARS = 300      # 관리자에게 보일 출처 글 길이
+NAME_CHARS = 500       # 한글 이름 근거로 Gemini 에 보일 검색 본문 조각 길이
 
 SEARCH_TOOL = {"name": "web_search", "description": "웹 검색. 결과 페이지를 모두 열어 주소 · 제목 · 본문 앞부분(content) · 게시일을 돌려줍니다. "
                                                    "opened 가 false 면 열 수 없는 페이지라 content 는 검색 조각입니다.",
@@ -130,6 +131,11 @@ class WebSearch:
 
     def close(self):
         self.pages.close()
+
+    def mentions(self, name: str) -> list[str]:
+        """11/24 한글 활동명 근거 — '{이름} 가수 앨범' 검색 1번(1크레딧)의 제목 · 본문 조각. 페이지는 열지 않음.
+        (11/24 시험: Royal 44 → 로얄44 · Skinny Brown → 스키니브라운 · palecistus → 페일시스터스)"""
+        return [f"{r['title']} | {r['content'][:NAME_CHARS]}" for r in self.search.search(f"{name} 가수 앨범")]
 
     def releases(self, artist: dict) -> list[dict]:
         """[{title, type(없으면 None), released_at, evidence, formats: [{format, name, released_at, pre_order, vinyl_color, reference_price, evidence}]}]"""

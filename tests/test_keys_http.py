@@ -115,3 +115,13 @@ def test_kopis_requests_are_spaced_three_seconds_apart(sessions):
     http.get("t", "https://other.test/a")
     http.get("t", "https://other.test/b")
     assert len(sleeps) == 1 and sleeps[0] <= 1.0                         # 다른 사이트는 그대로 1초
+
+
+def test_include_ids_read_from_the_seed_file(tmp_path, monkeypatch):
+    from crawler import config
+    f = tmp_path / "include.txt"
+    f.write_text("# 주석\n86bfda70-ad8c-4db4-9041-e4843d918269  # QWER\n\n", encoding="utf-8")
+    monkeypatch.setenv("INCLUDE_FILE", str(f))
+    assert config.load().include_ids == frozenset({"86bfda70-ad8c-4db4-9041-e4843d918269"})
+    monkeypatch.setenv("INCLUDE_FILE", str(tmp_path / "none.txt"))
+    assert config.load().include_ids == frozenset()

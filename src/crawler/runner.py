@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from . import db as dbm
+from . import notify
 from .keys import norm
 from .pipeline import Pipeline
 from .webtools import MONTHLY_SEARCHES, RUN_BUDGET, SEARCH_RESERVE
@@ -38,10 +39,12 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
         try:
             return fn()
         except Exception as e:
-            errors.append(f"{name}: {type(e).__name__}: {e}")
+            code = notify.error_code(e)            # 11/24 알림에 코드 (HTTP 400 · Studio 401 …) — 예외 이름과 같으면 붙이지 않음
+            errors.append(f"{name}{f' [{code}]' if code != type(e).__name__ else ''}: {type(e).__name__}: {e}")
             log.exception("crawl_stage_failed kind=%s run=%s stage=%s", kind, run_id, name)
             return None
 
+    pipeline.load_reviewed()   # 관리자가 처리한 후보 — 거절한 것은 다시 찾지 않음 (11/24 · 못 받으면 전처럼 · 예외를 내지 않음)
     found = stage("공연", pipeline.concerts) or []
     concerts_failed = bool(errors)
     if kind == "dawn":
@@ -76,6 +79,7 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
         s.commit()
     log.info("crawl_run_done kind=%s run=%s status=%s stats=%s", kind, run_id, status, row.stats_json)
     return {"run": run_id, "status": status, "stats": dict(pipeline.stats), "error": error,
+            "stage_errors": errors, "failures": pipeline.failures,
             "input_tokens": row.input_tokens, "output_tokens": row.output_tokens}
 
 

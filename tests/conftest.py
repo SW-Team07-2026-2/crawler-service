@@ -59,9 +59,14 @@ def make_http(sessions, web) -> Http:
 
 
 class FakeLlm:
-    def __init__(self, concerts=None, genres=None):
+    def __init__(self, concerts=None, genres=None, names=None, mainstream=(), picks=None):
         self.concerts = concerts or {}      # mt20id → 결과
         self.genres = genres or {}          # 이름 → 장르
+        self.names = names or {}            # 이름 → 한글 활동명
+        self.web: dict[str, list[str]] = {} # 이름 → 한글 이름 근거로 넘긴 웹 검색 조각
+        self.mainstream = set(mainstream)   # 대중 쪽으로 볼 이름 (나머지는 INDIE)
+        self.picks = picks or {}            # 이름 → 같은 이름 후보 중 고를 id
+        self.picked: dict[str, tuple] = {}  # 이름 → (후보 id 들, 공연 정보)
         self.calls: list[str] = []
         self.facts: dict[str, dict] = {}    # mt20id → Haiku 에 넘긴 값
         self.images: dict[str, int] = {}    # mt20id → 이미지 조각 수
@@ -73,15 +78,30 @@ class FakeLlm:
         self.facts[mt20id], self.images[mt20id] = facts, len(images or [])
         return copy.deepcopy(self.concerts[mt20id])     # 실제 Gemini 처럼 부를 때마다 새 결과 (파이프라인이 고쳐 써도 다음 호출에 안 남게)
 
-    def artist_genres(self, name, aliases, albums, label):
+    def pick_artist(self, name, candidates, concert):
+        self.calls.append(f"pick:{name}")
+        self.picked[name] = ([c["id"] for c in candidates], concert)
+        return self.picks.get(name)
+
+    def artist_info(self, name, aliases, albums, label, legal_names=(), web=()):
         self.calls.append(f"artist:{name}")
-        return self.genres.get(name, [])
+        self.web[name] = list(web)
+        return {"relevance": "MAINSTREAM" if name in self.mainstream else "INDIE",
+                "genres": self.genres.get(name, []), "korean_name": self.names.get(name)}
 
 
 class FakeStudio:
-    def __init__(self, reject=None):
+    def __init__(self, reject=None, reviewed=None):
         self.posts: list[tuple[str, dict]] = []
         self.reject = reject                 # 이 external_id 가 묶음에 있으면 400
+        self.reviewed = reviewed             # GET /internal/crawl/reviewed 응답 · "down" 이면 실패
+        self.gets: list[str] = []
+
+    def get(self, path):
+        self.gets.append(path)
+        if self.reviewed == "down":
+            raise ConnectionError("studio down")
+        return self.reviewed or {"concerts": [], "artists": [], "albums": []}
 
     def post(self, path, body):
         from crawler.studio import StudioRejected

@@ -33,16 +33,54 @@ def test_schemas_fit_structured_output_limits():
         assert "anyOf" not in text and '"type": [' not in text
 
 
-def test_artist_genres_request_and_cleanup():
+def test_artist_info_request_and_cleanup():
     llm = llm_with(response('{"genres": ["shoegaze", "INDIE_ROCK", "SHOEGAZE", "NOPE", "EMO", "PUNK"]}'))
-    assert llm.artist_genres("Silica Gel", ["실리카겔"], ["Kyo181"], "Magic Strawberry Sound") == ["SHOEGAZE", "INDIE_ROCK", "EMO"]
+    assert llm.artist_info("Silica Gel", ["실리카겔"], ["Kyo181"], "Magic Strawberry Sound")["genres"] == ["SHOEGAZE", "INDIE_ROCK", "EMO"]
     req = llm.client.models.requests[0]
     assert req["model"] == "gemini-3.5-flash-lite"
     cfg = req["config"]
     assert cfg.response_mime_type == "application/json"
     assert cfg.response_json_schema["properties"]["genres"]["items"]["enum"] == GENRES
-    assert cfg.thinking_config.thinking_level.value == "HIGH" and cfg.max_output_tokens >= 16000   # 생각 토큰까지 들어갈 자리
+    assert cfg.thinking_config.thinking_level.value == "MEDIUM" and cfg.max_output_tokens >= 16000   # 생각 토큰까지 들어갈 자리
     assert llm.input_tokens == 100 and llm.output_tokens == 20 + 30                                # 생각 토큰 포함
+
+
+def test_artist_korean_name_is_kept_only_when_it_is_hangul_and_not_the_legal_name():
+    """11/23 영어 이름은 한글 활동명으로 — 본명(윤진영) · 영어 그대로 · 빈 값은 None (MusicBrainz 이름을 그대로 씀)"""
+    web = ["Royal 44(로얄44) - I Been Freestyle | Royal44 #로얄44 ENA 음악차트쇼"]
+    ok = llm_with(response('{"genres": ["HIPHOP"], "koreanName": " 로얄44 "}'))
+    assert ok.artist_info("Royal 44", [], [], None, web=web) == {"relevance": "INDIE", "genres": ["HIPHOP"], "korean_name": "로얄44"}
+    sent = json.loads(ok.client.models.requests[0]["contents"])
+    assert sent["legalNames"] == [] and sent["webResults"] == web
+    assert ok.client.models.requests[0]["config"].response_json_schema["properties"]["koreanName"]
+    for answer in ("윤진영", "ASH ISLAND", ""):
+        llm = llm_with(response(json.dumps({"genres": [], "koreanName": answer})))
+        assert llm.artist_info("ASH ISLAND", ["윤진영"], [], None, legal_names=["윤진영"])["korean_name"] is None
+
+
+def test_artist_relevance_is_mainstream_only_when_the_model_says_so():
+    """11/24 대중 쪽 아티스트 판단 — MAINSTREAM 만 그대로 · 대소문자 무시 · 그 밖(빠짐 · 이상한 값)은 INDIE (모르는 팀은 다룸)"""
+    for answer, expected in (("MAINSTREAM", "MAINSTREAM"), ("mainstream", "MAINSTREAM"), ("INDIE", "INDIE"), ("", "INDIE")):
+        llm = llm_with(response(json.dumps({"relevance": answer, "genres": [], "koreanName": ""})))
+        assert llm.artist_info("김종국", [], ["Edition"], None)["relevance"] == expected
+    assert llm.client.models.requests[0]["config"].response_json_schema["properties"]["relevance"]["enum"] == ["INDIE", "MAINSTREAM"]
+    assert "힙합" in llm.client.models.requests[0]["config"].system_instruction
+
+
+def test_artist_korean_name_must_be_an_alias_or_appear_next_to_the_name_in_a_search_result():
+    """11/24 근거 없이 물으니 Royal 44 → '로열포티포' 를 지어냄 — 별칭이거나, 검색 결과 한 건에 영어 이름과 함께 보일 때만"""
+    def ask(name, answer, aliases=(), web=()):
+        return llm_with(response(json.dumps({"genres": [], "koreanName": answer}))).artist_info(
+            name, list(aliases), [], None, web=list(web))["korean_name"]
+
+    assert ask("Royal 44", "로열포티포") is None                                          # 근거 없음
+    assert ask("Royal 44", "로열포티포", web=["Royal 44(로얄44) - I Been Freestyle"]) is None
+    assert ask("Car, the Garden", "카더가든", aliases=["메이슨 더 소울", "카더가든"]) == "카더가든"
+    assert ask("Skinny Brown", "스키니브라운", web=["Skinny Brown - 스키니브라운 | 나무위키"]) == "스키니브라운"
+    assert ask("YUL2", "전유진", web=["가수 전유진 | 첫 정규앨범 아디오스", "YUL2 (율) - Lost in Paradise | 싱글"]) is None
+    assert ask("YUL2", "율", web=["가수 전유진 | 첫 정규앨범 아디오스", "YUL2 (율) - Lost in Paradise | 싱글"]) == "율"
+    moon = llm_with(response('{"genres": [], "koreanName": "문수진"}'))     # 본명으로 활동하면 한글 본명이 활동명
+    assert moon.artist_info("Moon Sujin", ["문", "문수진"], [], None, legal_names=["Moon Sujin", "문수진"])["korean_name"] == "문수진"
 
 
 def test_concert_sends_images_before_the_text():
@@ -70,13 +108,13 @@ def test_minute_limit_waits_retry_delay_then_daily_limit_stops_the_rest_of_the_r
     sleeps = []
     llm = llm_with(quota_error("GenerateRequestsPerMinutePerProjectPerModel-FreeTier"), response('{"genres": []}'),
                    quota_error("GenerateRequestsPerDayPerProjectPerModel-FreeTier"), sleeps=sleeps)
-    assert llm.artist_genres("A", [], [], None) == []
+    assert llm.artist_info("A", [], [], None)["genres"] == []
     assert sleeps == [24.0]                                       # API 가 알려 준 23초 + 1
     with pytest.raises(LlmSkip, match="quota"):
-        llm.artist_genres("B", [], [], None)
+        llm.artist_info("B", [], [], None)
     assert llm.exhausted
     with pytest.raises(LlmSkip, match="quota"):                   # 남은 호출은 API 를 부르지 않음
-        llm.artist_genres("C", [], [], None)
+        llm.artist_info("C", [], [], None)
     assert len(llm.client.models.requests) == 3
 
 
@@ -89,7 +127,7 @@ def test_server_error_that_keeps_coming_stops_the_rest_of_the_run_not_the_stage(
         llm.concert({"detail": {"mt20id": "PF1"}})
     assert sleeps == [60, 120, 240, 480] and llm.exhausted and llm.stop_reason == "unavailable"   # 1 · 2 · 4 · 8분 기다린 뒤에야
     with pytest.raises(LlmSkip, match="unavailable"):              # 남은 호출은 API 를 부르지 않음
-        llm.artist_genres("A", [], [], None)
+        llm.artist_info("A", [], [], None)
     assert len(llm.client.models.requests) == 5
 
 
@@ -97,7 +135,7 @@ def test_server_error_that_passes_within_the_waits_is_just_a_delay():
     busy = lambda: errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
     sleeps = []
     llm = llm_with(busy(), busy(), busy(), response('{"genres": ["EMO"]}'), sleeps=sleeps)
-    assert llm.artist_genres("A", [], [], None) == ["EMO"] and sleeps == [60, 120, 240] and not llm.exhausted
+    assert llm.artist_info("A", [], [], None)["genres"] == ["EMO"] and sleeps == [60, 120, 240] and not llm.exhausted
 
 
 def test_bad_request_skips_only_that_item_but_auth_errors_stop_the_run():
@@ -110,8 +148,8 @@ def test_bad_request_skips_only_that_item_but_auth_errors_stop_the_run():
 def test_calls_are_spaced_for_the_minute_limit():
     sleeps = []
     llm = Llm(None, "m", client=fake_client(response('{"genres": []}'), response('{"genres": []}')), sleep=sleeps.append, gap=60)
-    llm.artist_genres("A", [], [], None)
-    llm.artist_genres("B", [], [], None)
+    llm.artist_info("A", [], [], None)
+    llm.artist_info("B", [], [], None)
     assert len(sleeps) == 1 and 59 < sleeps[0] <= 60
 
 
