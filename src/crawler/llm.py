@@ -47,6 +47,15 @@ ARTIST_SCHEMA = _obj({
     "koreanName": {"type": "string", "description": "한국에서 쓰는 한글 활동명 · 모르면 빈 문자열"},
 })
 
+PICK_SYSTEM = """공연 출연진 이름 하나가 MusicBrainz 에서 같은 이름의 한국 아티스트 여럿과 맞습니다.
+공연 정보(concert: 제목 · 공연장 · 소개 · 함께 나오는 팀)와 후보(candidates: 설명(disambiguation) · 종류 · 성별 · 별칭 · 발매작)를 보고
+이 공연에 나오는 사람이 어느 후보인지 고르세요.
+- 공연 정보와 맞는 후보가 확실히 하나일 때만 그 id 를 돌려줍니다. 둘 이상이 그럴듯하거나 아무도 맞지 않으면 빈 문자열.
+- 근거: 소개에 나온 역할(싱어송라이터 · 밴드 · 배우 등) · 성별 · 소속 · 기획사 · 공연장 규모 · 함께 나오는 팀 · 발매작.
+- 그룹 멤버 · 배우 · 세션 연주자 · 작사가처럼 그 공연의 주인공과 다른 활동을 하는 후보는 공연 정보가 그 활동을 말할 때만 고릅니다."""
+
+PICK_SCHEMA = _obj({"id": {"type": "string", "description": "고른 후보의 id · 확실하지 않으면 빈 문자열"}})
+
 CONCERT_SCHEMA = _obj({
     "relevance": {"type": "string", "enum": ["INDIE", "MAINSTREAM", "HIPHOP", "NOT_CONCERT"]},
     "title": {"type": "string"},
@@ -233,6 +242,12 @@ class Llm:
             korean = None
         relevance = "MAINSTREAM" if str(result.get("relevance", "")).upper() == "MAINSTREAM" else "INDIE"
         return {"relevance": relevance, "genres": genres[:3], "korean_name": korean}
+
+    def pick_artist(self, name: str, candidates: list[dict], concert: dict) -> str | None:
+        """11/24 같은 이름의 한국 아티스트 여럿 중 이 공연에 나오는 사람 — 확실할 때만 id (아니면 None)"""
+        content = json.dumps({"name": name, "concert": concert, "candidates": candidates}, ensure_ascii=False)
+        picked = str(self.extract(PICK_SYSTEM, content, PICK_SCHEMA).get("id") or "").strip()
+        return picked if picked in {c["id"] for c in candidates} else None
 
     def concert(self, facts: dict, images: list[bytes] | None = None) -> dict:
         """facts: {detail, venue, knownArtists} · images: JPEG 조각 (포스터 → 소개 이미지 순, images.slices)"""

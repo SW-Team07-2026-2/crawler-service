@@ -221,3 +221,20 @@ def test_robots_crawl_delay_is_respected(sessions):
     http.get("x", "https://slow.example/a")
     http.get("x", "https://slow.example/b")
     assert waits and waits[0] > 9
+
+
+def test_same_name_korean_artists_are_picked_not_guessed(sessions):
+    """11/24 정우 — 같은 이름의 한국 아티스트가 여럿이면 점수 높은 쪽(NCT)을 고르지 않고 pick 에 맡김 · pick 이 없으면 만들지 않음"""
+    web = FakeWeb([("/robots.txt", 200, "")])
+    web.add("artist?query=", {"artists": [
+        {"id": "nct", "name": "정우", "score": 100, "country": "KR", "disambiguation": "NCT", "aliases": [{"name": "Jungwoo"}]},
+        {"id": "indie", "name": "정우", "score": 74, "country": "KR", "disambiguation": "CTRSOUND", "aliases": [{"name": "JUNGWOO"}]},
+        {"id": "us", "name": "Jungwoo", "score": 70, "country": "US", "aliases": []}]})
+    for mbid in ("nct", "indie"):
+        web.add(f"artist/{mbid}?", {"id": mbid, "name": "정우", "aliases": []})
+    http = make_http(sessions, web)
+    asked = []
+    a = musicbrainz.find_artist(http, "정우", pick=lambda found: asked.append([f["id"] for f in found]) or "indie")
+    assert a["mbid"] == "indie" and asked == [["nct", "indie"]]          # 한국 아티스트만 후보로
+    assert musicbrainz.find_artist(http, "정우") is None                  # 고를 근거가 없으면 만들지 않음
+    assert musicbrainz.find_artist(http, "정우", pick=lambda found: "us") is None   # 후보 밖 id 는 받지 않음

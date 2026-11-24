@@ -1053,3 +1053,42 @@ def test_concerts_handled_by_admins_skip_the_ticket_open_search(sessions):
     runner.run("lunch", sessions, p, [])
     assert search.asked == []                          # 등록한 공연 — 예매 오픈은 관리자가 넣음 (KOPIS 상세는 바뀜 확인용으로 계속)
     assert items(sessions, "CONCERT")["PF100"].status == "SENT"
+
+
+def _same_name_web():
+    w = web()
+    w.add(quote("정우"), {"artists": [
+        {"id": "nct", "name": "정우", "score": 100, "country": "KR", "disambiguation": "NCT", "gender": "male", "aliases": []},
+        {"id": "jw", "name": "정우", "score": 74, "country": "KR", "disambiguation": "CTRSOUND", "gender": "female",
+         "aliases": [{"name": "JUNGWOO"}]}]})
+    w.add("artist/jw?", {"id": "jw", "name": "정우", "type": "Person", "gender": "Female", "aliases": [{"name": "JUNGWOO"}]})
+    w.add("artist/nct?", {"id": "nct", "name": "정우", "gender": "Male", "aliases": []})
+    w.add("release-group?artist=jw", {"release-groups": [{"id": "rgJ", "title": "철의 삶", "primary-type": "Album", "first-release-date": "2024-04-01"}]})
+    w.add("release-group?artist=nct", {"release-groups": [{"id": "rgN", "title": "SUGAR", "primary-type": "Single", "first-release-date": "2025-11-28"}]})
+    w.add("release?release-group=rgJ", {"releases": [{"date": "2024-04-01", "media": [{"tracks": [{"title": "철의 삶"}]}],
+                                                       "label-info": [{"label": {"name": "CTRSOUND"}}]}]})
+    return w
+
+
+def test_same_name_artist_is_picked_from_the_concert_it_came_from(sessions):
+    """11/24 정우 — 같은 이름의 한국 아티스트(NCT · 인디 싱어송라이터)가 여럿이면 이 이름이 나온 공연을 보고 Gemini 가 고름
+    (전에는 점수 높은 NCT 정우로 이어 대중으로 빠지고 그 단독 공연까지 라인업 확인으로 빠졌음)"""
+    solo = {**INDIE, "title": "정우 단독 공연", "artistNames": ["정우"], "venueName": "NOL 씨어터 합정"}
+    llm = FakeLlm(concerts={"PF100": solo, "PF200": MAINSTREAM}, genres={"정우": ["FOLK"]}, picks={"정우": "jw"})
+    studio = FakeStudio()
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, _same_name_web()), settings(kopis_key="KEY"),
+                                                llm=llm, studio=studio), [])
+    ids, context = llm.picked["정우"]
+    assert ids == ["nct", "jw"] and context["title"] == "정우 단독 공연" and context["venueName"] == "NOL 씨어터 합정"
+    assert [(a["name"], a["gender"]) for path, body in studio.posts if path == ARTISTS for a in body["items"]] == [("정우", "FEMALE")]
+    assert out["stats"]["artist_same_name_picked"] == 1
+    assert items(sessions, "CONCERT")["PF100"].status == "SENT"                # 단독 공연도 그대로
+
+
+def test_same_name_artist_without_a_concert_is_not_guessed(sessions):
+    """시드처럼 나온 공연을 모르는 이름은 고를 근거가 없어 만들지 않음 (Gemini 도 묻지 않음)"""
+    llm = FakeLlm(concerts={"PF100": {**INDIE, "artistNames": []}, "PF200": MAINSTREAM}, picks={"정우": "jw"})
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, _same_name_web()), settings(kopis_key="KEY"),
+                                                llm=llm, studio=FakeStudio()), ["정우"])
+    assert "pick:정우" not in llm.calls and out["stats"]["artist_same_name_unresolved"] == 1
+    assert not [i for i in items(sessions, "ARTIST").values() if json.loads(i.payload_json)["name"] == "정우"]
