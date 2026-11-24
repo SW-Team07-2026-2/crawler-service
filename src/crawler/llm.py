@@ -2,7 +2,8 @@
 
 - 구조화 출력(response_json_schema)으로 정해진 모양 · 값만 받습니다. 모든 필드를 필수로 두고 "모름" 은 "" · -1 · NONE · UNKNOWN 으로 받아
   코드에서 null 로 바꿉니다 (Haiku 때 스키마 그대로 · 11/18 실호출로 enum · additionalProperties 받는 것 확인).
-- 정확도가 먼저라(11/17 사용자 결정) 생각 수준(thinking_level)은 HIGH. 생각 토큰도 max_output_tokens 에 들어가므로 넉넉히 둡니다.
+- 생각 수준(thinking_level)은 MEDIUM — 11/17 정확도 우선으로 HIGH 였으나 11/23 밤 HIGH 만 503 "high demand" 가 몇 시간 이어져
+  (같은 요청이 LOW · MEDIUM 은 응답) 11/24 사용자 결정으로 내림. 생각 토큰도 max_output_tokens 에 들어가므로 넉넉히 둡니다.
 - 웹 조사(research)는 우리 함수(웹 검색 · 페이지 열기)를 모델이 고르는 함수 호출 반복 — 자동 함수 호출은 끄고 직접 돌립니다
   (도구 결과를 기록해 지어낸 출처를 거르기 위해 · sources/websearch.py).
 - 무료 등급 한도: 분당 요청 수를 넘지 않게 호출 사이를 띄우고, 429 는 API 가 알려 준 시간만큼 쉬었다가 다시.
@@ -38,13 +39,16 @@ def _obj(props: dict) -> dict:
     return {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
 
 
+THINKING = "MEDIUM"
+
 ARTIST_SCHEMA = _obj({
+    "relevance": {"type": "string", "enum": ["INDIE", "MAINSTREAM"]},
     "genres": {"type": "array", "items": {"type": "string", "enum": GENRES}},
     "koreanName": {"type": "string", "description": "한국에서 쓰는 한글 활동명 · 모르면 빈 문자열"},
 })
 
 CONCERT_SCHEMA = _obj({
-    "relevance": {"type": "string", "enum": ["INDIE", "MAINSTREAM", "NOT_CONCERT"]},
+    "relevance": {"type": "string", "enum": ["INDIE", "MAINSTREAM", "HIPHOP", "NOT_CONCERT"]},
     "title": {"type": "string"},
     "type": {"type": "string", "enum": CONCERT_TYPES},
     "genre": {"type": "string", "enum": [*GENRES, "NONE"]},
@@ -61,7 +65,17 @@ CONCERT_SCHEMA = _obj({
     "notices": {"type": "array", "items": {"type": "string"}},
 })
 
-ARTIST_SYSTEM = """한국 인디 아티스트의 장르와 한글 활동명을 정합니다.
+# 11/24 indig 가 다루는 아티스트 — 공연 · 아티스트 판단이 같이 씀 (사람이 읽는 판(서비스 설명)과 이유는 docs/v2_인디_아티스트_기준.md)
+INDIE_RULES = """indig 가 다루는 아티스트:
+- 다룸: 스스로 또는 인디 레이블 · 작은 기획사에서 음악을 만들고 클럽 · 라이브홀 · 소극장 · 인디 페스티벌 무대에 서는 밴드 · 싱어송라이터 · 프로듀서 · 연주자.
+  록 · 팝 · 포크 · 일렉트로닉 · 재즈 · R&B 등 장르는 넓게 봅니다. 유명해지거나 큰 무대에 서도 이렇게 활동하면 다룹니다.
+- 다루지 않음(대중): 아이돌 그룹과 그 멤버 · 대형 기획사 소속 가수 · 방송 · 오디션 프로그램 중심 가수 · 트로트 가수 · 방송 중심 발라드 가수 · 배우 · 방송인의 음악 활동.
+- 다루지 않음(힙합): 힙합 · 랩이 중심인 아티스트."""
+
+ARTIST_SYSTEM = """indig 에서 다룰 아티스트인지와 장르 · 한글 활동명을 정합니다.
+""" + INDIE_RULES + """
+- relevance: 다루는 아티스트면 INDIE, 대중 쪽이면 MAINSTREAM. 이름 · 앨범 · 레이블로 대중 쪽이 확실할 때만 MAINSTREAM — 잘 모르는 팀은 INDIE
+  (공연 · 발매로 들어온 작은 팀은 대개 인디). 같은 이름의 다른 사람과 헷갈리지 않게 앨범 · 레이블로 확인합니다. 힙합은 장르(HIPHOP)로 따로 거릅니다.
 - genres: 정해진 목록에서 최대 3개, 대표적인 것부터. 이 아티스트를 확실히 알지 못하면 빈 배열 — 이름만 보고 짐작하지 않습니다.
   앨범 제목 · 레이블은 같은 이름의 다른 아티스트와 구분하는 참고용입니다.
 - koreanName: 한국 음원 사이트 · 공연 소개에서 이 아티스트를 부르는 한글 활동명 (예: SE SO NEON → 새소년, ADOY → 아도이, 10cm → 십센치).
@@ -74,7 +88,9 @@ ARTIST_SYSTEM = """한국 인디 아티스트의 장르와 한글 활동명을 �
 
 CONCERT_SYSTEM = """KOPIS 공연 상세(JSON)와 그 공연의 포스터 · 소개 이미지를 indig 공연 후보로 정리합니다. indig 는 한국 인디 음악(밴드 · 싱어송라이터 · 인디 레이블) 플랫폼이고, 결과는 관리자가 확인한 뒤 등록됩니다.
 입력: detail(KOPIS 상세) · venue(공연시설 API 의 주소 · 좌석) · knownArtists(우리가 아는 아티스트 이름 중 이 공연 글에 보이는 것) · 이미지(포스터 다음에 소개 이미지, 긴 이미지는 위에서부터 잘라 순서대로).
-- relevance: 인디 음악 공연이면 INDIE. 아이돌 · 트로트 · 대형 기획사 가수 · 방송사 공연 · 클래식 · 뮤지컬은 MAINSTREAM. 음악 공연이 아니면 NOT_CONCERT. 애매하면 INDIE.
+- relevance: 아래 기준으로 다루는 아티스트의 음악 공연이면 INDIE. 아이돌 · 트로트 · 대형 기획사 가수 · 방송사 공연 · 클래식 · 뮤지컬은 MAINSTREAM.
+  힙합 · 랩이 중심인 공연(힙합 아티스트의 단독 공연 · 힙합 페스티벌 · 힙합 파티)은 HIPHOP. 음악 공연이 아니면 NOT_CONCERT. 애매하면 INDIE.
+""" + INDIE_RULES + """
 - type: 여러 팀이 나오는 페스티벌 · 합동 공연은 FESTIVAL, 한 팀의 단독 공연은 SOLO. genre 는 FESTIVAL 일 때만 대표 장르, SOLO 는 NONE.
 - startsAt · endsAt: 기간(prfpdfrom~prfpdto)과 공연 시간 안내(dtguidance)로 첫 회 시작 · 마지막 회 끝을 한국 시간 ISO 8601(+09:00)로. 끝 시각이 없으면 공연 시간(prfruntime)으로 계산하고, 그것도 없으면 "".
 - bookingOpenAt: 소개 이미지 · 글의 "티켓 오픈 · 예매 오픈 · 예매 일정" 공지에서 일반 예매가 시작되는 시각. 선예매(팬클럽 · 카드사 등)만 있으면 그 시각이 아니라 "". 연도가 없으면 공연 날짜보다 앞서는 가장 가까운 연도. 시각이 없으면 "".
@@ -110,7 +126,7 @@ class Llm:
         """content: 글 또는 [이미지 Part …, 글 Part]"""
         r = self._generate(content, types.GenerateContentConfig(
             system_instruction=system, response_mime_type="application/json", response_json_schema=schema,
-            thinking_config=types.ThinkingConfig(thinking_level="HIGH"), max_output_tokens=MAX_TOKENS))
+            thinking_config=types.ThinkingConfig(thinking_level=THINKING), max_output_tokens=MAX_TOKENS))
         try:
             return json.loads(r.text or "")
         except json.JSONDecodeError:
@@ -125,7 +141,7 @@ class Llm:
             tools=[types.Tool(function_declarations=[types.FunctionDeclaration(
                 name=d["name"], description=d["description"], parameters_json_schema=d["parameters"]) for d, _ in tools])],
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            thinking_config=types.ThinkingConfig(thinking_level="HIGH"), max_output_tokens=MAX_TOKENS)
+            thinking_config=types.ThinkingConfig(thinking_level=THINKING), max_output_tokens=MAX_TOKENS)
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=content)])]
         for _ in range(turns):
             r = self._generate(contents, config)
@@ -193,7 +209,7 @@ class Llm:
 
     def artist_info(self, name: str, aliases: list[str], albums: list[str], label: str | None,
                     legal_names: list[str] = (), web: list[str] = ()) -> dict:
-        """{genres, korean_name} — 한글 활동명은 근거에 있을 때만 (아니면 None): 한글이 들어 있고 본명이 아니며(본명으로 활동하면 본명도),
+        """{relevance(INDIE · MAINSTREAM), genres, korean_name} — 한글 활동명은 근거에 있을 때만 (아니면 None): 한글이 들어 있고 본명이 아니며(본명으로 활동하면 본명도),
         별칭 중 하나이거나 웹 검색 결과 한 건(제목 · 본문 조각)에 영어 이름과 함께 보여야 함
         (11/24 근거 없이 물으니 Royal 44 → '로열포티포' 를 지어냄 · 실제 표기는 로얄44)"""
         payload = {"name": name, "aliases": aliases, "legalNames": list(legal_names), "albums": albums[:15], "label": label}
@@ -214,7 +230,8 @@ class Llm:
         seen = k in {norm(a) for a in aliases} or any(k in norm(w) and norm(name) in norm(w) for w in web)
         if not HANGUL.search(korean) or k in legal or not seen:
             korean = None
-        return {"genres": genres[:3], "korean_name": korean}
+        relevance = "MAINSTREAM" if str(result.get("relevance", "")).upper() == "MAINSTREAM" else "INDIE"
+        return {"relevance": relevance, "genres": genres[:3], "korean_name": korean}
 
     def concert(self, facts: dict, images: list[bytes] | None = None) -> dict:
         """facts: {detail, venue, knownArtists} · images: JPEG 조각 (포스터 → 소개 이미지 순, images.slices)"""

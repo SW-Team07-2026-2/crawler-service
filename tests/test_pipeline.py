@@ -175,6 +175,46 @@ def test_english_name_without_a_hangul_alias_is_looked_up_once_in_web_search(ses
     assert out["stats"]["artist_name_search"] == 1
 
 
+def test_mainstream_and_hiphop_artists_are_skipped_without_albums_web_search_or_their_concert(sessions):
+    """11/24 indig 가 다루지 않는 아티스트 — 대중 쪽(Gemini) · 대표 장르가 힙합 → 보내지 않고 앨범 · 웹 검색도 없음.
+    라인업 팀 절반 넘게가 뺀 팀이면 공연(PF100 · 실리카겔 단독)도 보내지 않음"""
+    w, studio, search = web(), FakeStudio(), FakeSearcher()
+    llm = FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres={"검정치마": ["INDIE_ROCK"], "Silica Gel": ["HIPHOP", "RNB_SOUL"]},
+                  mainstream={"검정치마"})
+    out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm,
+                                                studio=studio, searcher=search), ["검정치마"])
+    assert out["status"] == "DONE" and studio.posts == []
+    assert {json.loads(i.payload_json)["name"]: (i.status, i.error) for i in items(sessions, "ARTIST").values()} == {
+        "검정치마": ("SKIPPED", "MAINSTREAM"), "Silica Gel": ("SKIPPED", "HIPHOP")}
+    assert items(sessions, "ALBUM") == {} and not [c for c in search.calls if c[0] in ("releases", "goods")]
+    assert (items(sessions, "CONCERT")["PF100"].status, items(sessions, "CONCERT")["PF100"].error) == ("SKIPPED", "LINEUP_HIPHOP")
+    st = out["stats"]
+    assert (st["artist_skipped_mainstream"], st["artist_skipped_hiphop"], st["concert_skipped_lineup"]) == (1, 1, 1)
+
+
+def test_artist_sent_before_and_now_judged_mainstream_is_skipped_once_and_stays_skipped(sessions):
+    """이미 보낸 팀을 다시 물어(ARTIST_ASK) 대중 쪽이면 내용이 같아도 SKIPPED · 그 팀 공연도 (Studio 대기열은 관리자가 거절).
+    한 번 정하면 다시 묻지 않고 SKIPPED 그대로"""
+    w = web()
+    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio()), ["검정치마"])
+    with sessions() as s:
+        s.execute(update(dbm.Item).where(dbm.Item.type == "ARTIST").values(input_hash="genres-only"))
+        s.commit()
+    genres = {"검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC", "INDIE_ROCK"]}
+    studio = FakeStudio()
+    out = runner.run("dawn", sessions, pipeline(sessions, w, studio, FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres,
+                                                                          mainstream={"Silica Gel"})), ["검정치마"])
+    assert studio.posts == []
+    artists = {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()}
+    assert artists == {"검정치마": "SENT", "Silica Gel": "SKIPPED"}
+    assert items(sessions, "CONCERT")["PF100"].status == "SKIPPED" and out["stats"]["concert_skipped_after_sent"] == 1
+
+    llm = FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres)          # 이번엔 INDIE 라고 해도 다시 묻지 않음
+    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio(), llm), ["검정치마"])
+    assert "artist:Silica Gel" not in llm.calls
+    assert {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()}["Silica Gel"] == "SKIPPED"
+
+
 def test_known_artist_is_refreshed_without_seed_or_concert_and_genres_stay(sessions):
     """공연에서 찾은 실리카겔은 시드에 없음 — 그래도 다음 새벽에 신보가 들어오고, 장르는 다시 묻지 않음 (모든 앨범이 다시 가지 않게)"""
     w = web()

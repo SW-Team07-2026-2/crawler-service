@@ -59,11 +59,12 @@ def make_http(sessions, web) -> Http:
 
 
 class FakeLlm:
-    def __init__(self, concerts=None, genres=None, names=None):
+    def __init__(self, concerts=None, genres=None, names=None, mainstream=()):
         self.concerts = concerts or {}      # mt20id → 결과
         self.genres = genres or {}          # 이름 → 장르
         self.names = names or {}            # 이름 → 한글 활동명
         self.web: dict[str, list[str]] = {} # 이름 → 한글 이름 근거로 넘긴 웹 검색 조각
+        self.mainstream = set(mainstream)   # 대중 쪽으로 볼 이름 (나머지는 INDIE)
         self.calls: list[str] = []
         self.facts: dict[str, dict] = {}    # mt20id → Haiku 에 넘긴 값
         self.images: dict[str, int] = {}    # mt20id → 이미지 조각 수
@@ -78,7 +79,8 @@ class FakeLlm:
     def artist_info(self, name, aliases, albums, label, legal_names=(), web=()):
         self.calls.append(f"artist:{name}")
         self.web[name] = list(web)
-        return {"genres": self.genres.get(name, []), "korean_name": self.names.get(name)}
+        return {"relevance": "MAINSTREAM" if name in self.mainstream else "INDIE",
+                "genres": self.genres.get(name, []), "korean_name": self.names.get(name)}
 
 
 class FakeStudio:

@@ -41,7 +41,7 @@ def test_artist_info_request_and_cleanup():
     cfg = req["config"]
     assert cfg.response_mime_type == "application/json"
     assert cfg.response_json_schema["properties"]["genres"]["items"]["enum"] == GENRES
-    assert cfg.thinking_config.thinking_level.value == "HIGH" and cfg.max_output_tokens >= 16000   # 생각 토큰까지 들어갈 자리
+    assert cfg.thinking_config.thinking_level.value == "MEDIUM" and cfg.max_output_tokens >= 16000   # 생각 토큰까지 들어갈 자리
     assert llm.input_tokens == 100 and llm.output_tokens == 20 + 30                                # 생각 토큰 포함
 
 
@@ -49,13 +49,22 @@ def test_artist_korean_name_is_kept_only_when_it_is_hangul_and_not_the_legal_nam
     """11/23 영어 이름은 한글 활동명으로 — 본명(윤진영) · 영어 그대로 · 빈 값은 None (MusicBrainz 이름을 그대로 씀)"""
     web = ["Royal 44(로얄44) - I Been Freestyle | Royal44 #로얄44 ENA 음악차트쇼"]
     ok = llm_with(response('{"genres": ["HIPHOP"], "koreanName": " 로얄44 "}'))
-    assert ok.artist_info("Royal 44", [], [], None, web=web) == {"genres": ["HIPHOP"], "korean_name": "로얄44"}
+    assert ok.artist_info("Royal 44", [], [], None, web=web) == {"relevance": "INDIE", "genres": ["HIPHOP"], "korean_name": "로얄44"}
     sent = json.loads(ok.client.models.requests[0]["contents"])
     assert sent["legalNames"] == [] and sent["webResults"] == web
     assert ok.client.models.requests[0]["config"].response_json_schema["properties"]["koreanName"]
     for answer in ("윤진영", "ASH ISLAND", ""):
         llm = llm_with(response(json.dumps({"genres": [], "koreanName": answer})))
         assert llm.artist_info("ASH ISLAND", ["윤진영"], [], None, legal_names=["윤진영"])["korean_name"] is None
+
+
+def test_artist_relevance_is_mainstream_only_when_the_model_says_so():
+    """11/24 대중 쪽 아티스트 판단 — MAINSTREAM 만 그대로 · 대소문자 무시 · 그 밖(빠짐 · 이상한 값)은 INDIE (모르는 팀은 다룸)"""
+    for answer, expected in (("MAINSTREAM", "MAINSTREAM"), ("mainstream", "MAINSTREAM"), ("INDIE", "INDIE"), ("", "INDIE")):
+        llm = llm_with(response(json.dumps({"relevance": answer, "genres": [], "koreanName": ""})))
+        assert llm.artist_info("김종국", [], ["Edition"], None)["relevance"] == expected
+    assert llm.client.models.requests[0]["config"].response_json_schema["properties"]["relevance"]["enum"] == ["INDIE", "MAINSTREAM"]
+    assert "힙합" in llm.client.models.requests[0]["config"].system_instruction
 
 
 def test_artist_korean_name_must_be_an_alias_or_appear_next_to_the_name_in_a_search_result():
