@@ -1012,3 +1012,44 @@ def test_concerts_sent_before_the_date_check_are_fixed_without_asking_gemini_aga
     c = json.loads(items(sessions, "CONCERT")["PF100"].payload_json)["concert"]
     assert c["startsAt"] == "2026-12-12T18:00:00+09:00" and c["reviewNotes"][0].startswith("검수 필요")
     assert items(sessions, "CONCERT")["PF100"].status == "READY"                   # 다시 보냄
+
+
+def test_rejected_concerts_and_artists_are_not_searched_again(sessions):
+    """11/24 관리자가 거절한 공연 · 아티스트는 다시 찾지 않음 (KOPIS 상세 · Gemini · MusicBrainz) · 관리자가 처리한 공연은 예매 오픈도 찾지 않음.
+    Studio 에서 목록을 못 받으면 전처럼 전부"""
+    w = web()
+    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio()), ["검정치마"])
+    keys = {json.loads(i.payload_json)["name"]: k for k, i in items(sessions, "ARTIST").items()}
+
+    w.calls.clear()
+    llm = FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM},
+                  genres={"검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC", "INDIE_ROCK"]})
+    studio = FakeStudio(reviewed={"concerts": [{"source": "kopis", "external_id": "PF100", "status": "REJECTED"}],
+                                  "artists": [{"source": "crawler", "external_id": keys["검정치마"], "status": "REJECTED"}],
+                                  "albums": []})
+    p = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm, studio=studio)
+    out = runner.run("dawn", sessions, p, ["검정치마"])
+    st = out["stats"]
+    assert out["status"] == "DONE" and studio.gets == ["/internal/crawl/reviewed"]
+    assert not any("prfplc/FC100" in u for u in w.calls)                        # 거절한 공연은 상세 · 공연장을 보지 않음
+    assert (st["concert_rejected_skip"], st["artist_rejected_skip"], st["reviewed_rejected"]) == (1, 1, 2)
+    assert st["artist_refreshed"] == 1                                           # 다시 보기는 거절 안 한 실리카겔만
+
+    down = FakeStudio(reviewed="down")
+    p = pipeline(sessions, w, down)
+    w.calls.clear()
+    out = runner.run("lunch", sessions, p, [])
+    assert out["status"] == "DONE" and out["stats"]["reviewed_fetch_error"] == 1
+    assert any("prfplc/FC100" in u for u in w.calls)                             # 못 받으면 전처럼
+
+
+def test_concerts_handled_by_admins_skip_the_ticket_open_search(sessions):
+    w = web()
+    search = FakeTicketSearch(None)
+    studio = FakeStudio(reviewed={"concerts": [{"source": "kopis", "external_id": "PF100", "status": "APPROVED"}],
+                                  "artists": [], "albums": []})
+    p = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM}),
+                 studio=studio, searcher=search)
+    runner.run("lunch", sessions, p, [])
+    assert search.asked == []                          # 등록한 공연 — 예매 오픈은 관리자가 넣음 (KOPIS 상세는 바뀜 확인용으로 계속)
+    assert items(sessions, "CONCERT")["PF100"].status == "SENT"
