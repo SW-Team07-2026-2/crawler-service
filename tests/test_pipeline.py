@@ -160,7 +160,8 @@ def test_english_name_without_a_hangul_alias_is_looked_up_once_in_web_search(ses
     out = runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm,
                                                 studio=studio, searcher=quota), ["검정치마"])
     assert ("mentions", "Silica Gel") in quota.calls and ("mentions", "검정치마") not in quota.calls
-    assert "artist:Silica Gel" not in llm.calls and out["stats"]["artist_name_search_deferred"] == 1
+    # 실행 끝 다시 묻기(11/25)에서 한 번 더 — 검색 한도라 또 다음 실행으로
+    assert "artist:Silica Gel" not in llm.calls and out["stats"]["artist_name_search_deferred"] == 2
     assert {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()} == {
         "검정치마": "SENT", "Silica Gel": "HOLD"}                       # 장르 · 이름을 못 정해 기다림
     assert [i["name"] for path, body in studio.posts if path == ARTISTS for i in body["items"]] == ["검정치마"]
@@ -629,30 +630,32 @@ class LimitedTicketSearch:
         return None
 
 
-def test_ticket_search_goes_soonest_first_and_carries_over_to_the_next_run(sessions):
+def test_ticket_search_goes_soonest_first_but_this_week_last_and_carries_over_to_the_next_run(sessions):
     w = web()
-    w.add("pblprfr?service=KEY", "<dbs><db><mt20id>PF100</mt20id></db><db><mt20id>PF200</mt20id></db>"
-                                 "<db><mt20id>PF300</mt20id></db></dbs>")
+    ids = ["PF100", "PF200", "PF300", "PF400"]
+    w.add("pblprfr?service=KEY", "<dbs>" + "".join(f"<db><mt20id>{i}</mt20id></db>" for i in ids) + "</dbs>")
     def dated(pf, day):   # KOPIS 기간을 그 공연 날짜로 — 원문 기간 밖 날짜는 크롤러가 고치므로
-        return KOPIS_DETAIL.replace("PF100", pf).replace("2026.12.12</prfpdfrom><prfpdto>2026.12.13", f"{day}</prfpdfrom><prfpdto>{day}")
-    w.add("pblprfr/PF100?", dated("PF100", "2027.03.01"))
-    w.add("pblprfr/PF200?", dated("PF200", "2026.12.01"))
-    w.add("pblprfr/PF300?", dated("PF300", "2020.01.01"))
-    later = {**INDIE, "title": "늦은 공연", "startsAt": "2027-03-01T19:00:00+09:00"}
-    sooner = {**INDIE, "title": "가까운 공연", "startsAt": "2026-12-01T19:00:00+09:00"}
-    past = {**INDIE, "title": "지난 공연", "startsAt": "2020-01-01T19:00:00+09:00"}
-    llm = FakeLlm(concerts={"PF100": later, "PF200": sooner, "PF300": past})
+        kopis_day = day.strftime("%Y.%m.%d")
+        return KOPIS_DETAIL.replace("PF100", pf).replace("2026.12.12</prfpdfrom><prfpdto>2026.12.13",
+                                                         f"{kopis_day}</prfpdfrom><prfpdto>{kopis_day}")
+    today = date.today()
+    days = {"PF100": today + timedelta(days=90), "PF200": today + timedelta(days=20),
+            "PF300": date(2020, 1, 1), "PF400": today + timedelta(days=3)}
+    for pf, day in days.items():
+        w.add(f"pblprfr/{pf}?", dated(pf, day))
+    titles = {"PF100": "늦은 공연", "PF200": "가까운 공연", "PF300": "지난 공연", "PF400": "이번 주 공연"}
+    llm = FakeLlm(concerts={pf: {**INDIE, "title": titles[pf], "startsAt": f"{days[pf].isoformat()}T19:00:00+09:00"} for pf in ids})
 
     first = LimitedTicketSearch(limit=1)
     p = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm, studio=FakeStudio(), searcher=first)
     runner.run("lunch", sessions, p, [])
     assert first.asked == ["가까운 공연"]                   # 시작이 가까운 것부터 · 지난 공연은 찾지 않음
-    assert p.stats["concert_ticket_deferred"] == 1
+    assert p.stats["concert_ticket_deferred"] == 2
 
     second = LimitedTicketSearch(limit=5)
     p = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm, studio=FakeStudio(), searcher=second)
     runner.run("lunch", sessions, p, [])
-    assert second.asked == ["늦은 공연"]                    # 찾아본 공연은 원문이 같으면 다시 찾지 않음
+    assert second.asked == ["늦은 공연", "이번 주 공연"]     # 7일 안 공연은 맨 뒤 (11/25) · 찾아본 공연은 원문이 같으면 다시 찾지 않음
 
     third = LimitedTicketSearch(limit=5)
     p = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm, studio=FakeStudio(), searcher=third)
@@ -935,9 +938,16 @@ def test_discogs_error_skips_only_the_physical_not_the_artist(sessions):
     llm = FakeLlm(genres={"검정치마": ["INDIE_ROCK"]})
     p = Pipeline(sessions, make_http(sessions, w), settings(discogs_token="T"), llm=llm, studio=FakeStudio())
     p.artists(["검정치마"])
-    assert p.stats["discogs_error"] == 1 and "artist_error" not in p.stats and p.stats["artist_ok"] == 1
+    # 11/25 지워진 Discogs 아티스트(404)는 연결이 없는 것과 같음 — 오류로 세지 않음 (실행마다 Slack 에 뜨던 것)
+    assert p.stats["discogs_gone"] == 1 and "discogs_error" not in p.stats and "discogs" not in p.failures
+    assert "artist_error" not in p.stats and p.stats["artist_ok"] == 1
     albums = {json.loads(i.payload_json)["title"]: json.loads(i.payload_json) for i in items(sessions, "ALBUM").values()}
     assert albums["201"]["physical_albums"] is None                   # 피지컬만 건드리지 않음
+
+    w.add("api.discogs.com/artists/9", {"message": "busy"}, status=500)   # 그 밖의 오류는 그대로 오류
+    p = Pipeline(sessions, make_http(sessions, w), settings(discogs_token="T"), llm=llm, studio=FakeStudio())
+    p.artists(["검정치마"])
+    assert p.stats["discogs_error"] == 1 and "discogs_gone" not in p.stats
 
 
 def test_artist_without_genres_waits_until_genres_are_judged(sessions):
@@ -959,6 +969,72 @@ def test_artist_without_genres_waits_until_genres_are_judged(sessions):
     assert [path for path, _ in studio2.posts] == [ARTISTS, ALBUMS]
     assert studio2.posts[0][1]["items"][0]["genres"] == ["INDIE_ROCK"]
     assert all(a["genres"] == ["INDIE_ROCK"] for a in studio2.posts[1][1]["items"])
+
+
+def test_artist_not_judged_because_gemini_was_busy_is_asked_again_at_the_end_of_the_run(sessions):
+    """11/25 Gemini 503 으로 못 물은 아티스트 — 실행 끝 다시 하기에서 한 번 더 (그 사이 Gemini 가 돌아왔으면 같은 실행에 보냄)"""
+    from crawler.llm import LlmSkip
+
+    class BusyOnce(FakeLlm):
+        def artist_info(self, name, *args, **kwargs):
+            if not any(c.startswith("artist:") for c in self.calls):
+                self.calls.append(f"artist:{name}")
+                raise LlmSkip("unavailable")
+            return super().artist_info(name, *args, **kwargs)
+
+    w, studio = web(), FakeStudio()
+    llm = BusyOnce(concerts={"PF100": INDIE, "PF200": MAINSTREAM},
+                   genres={"검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC"]})
+    out = runner.run("dawn", sessions, pipeline(sessions, w, studio, llm), ["검정치마"])
+    assert out["stats"]["artist_llm_unavailable"] == 1 and out["stats"]["artist_reask"] == 1
+    assert "artist_not_judged_left" not in out["stats"]
+    assert llm.calls.count("artist:검정치마") == 2                     # 처음 503 · 실행 끝에 다시
+    sent = {a["name"]: a["genres"] for path, body in studio.posts if path == ARTISTS for a in body["items"]}
+    assert sent == {"검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC"]}
+
+
+def test_artist_not_judged_at_night_is_asked_again_by_the_lunch_run(sessions):
+    """11/24 · 11/25 새벽 503 이 실행 내내 이어져 168팀을 못 물었는데, 점심은 공연만 해서 다음 새벽까지 그대로였음 → 점심에도 다시 물음"""
+    from crawler.llm import LlmSkip
+
+    class Busy(FakeLlm):
+        exhausted, stop_reason = False, "quota"
+
+        def artist_info(self, name, *args, **kwargs):
+            self.exhausted, self.stop_reason = True, "unavailable"
+            raise LlmSkip("unavailable")
+
+    w = web()
+    out = runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio(), Busy(concerts={"PF100": INDIE, "PF200": MAINSTREAM})),
+                     ["검정치마"])
+    assert out["stats"]["artist_reask_deferred"] == 2 and out["stats"]["artist_not_judged_left"] == 2   # 쉬는 중이면 묻지 않음
+    assert {i.status for i in items(sessions, "ARTIST").values()} == {"HOLD"}
+
+    studio = FakeStudio()
+    out = runner.run("lunch", sessions, pipeline(sessions, w, studio), [])
+    assert out["stats"]["artist_reask"] == 2 and "artist_not_judged_left" not in out["stats"]
+    assert [path for path, _ in studio.posts] == [ARTISTS, ALBUMS]
+    assert {a["name"]: a["genres"] for a in studio.posts[0][1]["items"]} == {
+        "검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC", "INDIE_ROCK"]}
+
+
+def test_store_titles_match_albums_without_edition_words():
+    """11/25 김밥레코즈 판본 214개 중 69개가 앨범에 못 붙고 버려졌음 — '정규 3집' · 'EP' 같은 앞말 · 판 이름 · 괄호 뒤를 떼고 봄"""
+    from crawler.pipeline import _same_album
+    kim = ["7102", "Romance", "헤븐 (Heaven)", "디폴트 (DEFAULT)", "수잔"]
+    assert _same_album("3집 헤븐", kim) == "헤븐 (Heaven)"
+    assert _same_album("1집 수잔", kim) == "수잔"
+    assert _same_album("2집 로맨스", kim) is None                              # 한글 · 영어 제목 차이는 관리자가
+    assert _same_album("EP 2집 집(HOME)", ["집", "입춘"]) == "집"
+    assert _same_album("정규 4집 : 0집", ["0집", "역성"]) == "0집"
+    assert _same_album("사랑으로 (정규앨범)", ["사랑으로 (through love)", "20"]) == "사랑으로 (through love)"
+    assert _same_album("서울병 10th Anniversary Edition", ["서울병", "계몽"]) == "서울병"
+    assert _same_album("정규 5집 5.0", ["5.0", "5.0 (Acoustic)"]) == "5.0"   # 다른 판(Acoustic)은 같은 앨범으로 보지 않음
+    assert _same_album("5.0", ["5.0 (Acoustic)"]) is None
+    assert _same_album("동물", ["동물", "동물 (Remastered)"]) == "동물"
+    assert _same_album("온(百)", ["ON(百)"]) is None                          # 괄호 안만 같은 것은 붙이지 않음
+    assert _same_album("EPIK", ["IK"]) is None                                # 'EP' 로 시작하는 낱말은 그대로
+    assert _same_album("정규 2집 POWER ANDRE 99", ["POWER ANDRE 99", "Kyo181"]) == "POWER ANDRE 99"   # 전과 같음
 
 
 def test_concert_dates_outside_the_kopis_period_are_fixed_and_flagged_for_review():

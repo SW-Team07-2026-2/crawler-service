@@ -56,9 +56,11 @@ def serve():
     sched = BlockingScheduler(timezone="Asia/Seoul")
     # 정각에 몰리지 않게 몇 분씩 흩음 (MusicBrainz 이용 정책) · 한 번에 하나만 · 놓친 실행은 1시간 안이면 바로
     common = {"max_instances": 1, "coalesce": True, "misfire_grace_time": 3600}
-    sched.add_job(lambda: _safe("dawn"), CronTrigger(hour=3, minute=30, jitter=1200, timezone="Asia/Seoul"), id="dawn", **common)
+    # 전체 실행(dawn)은 20:00 — 11/25 사용자 결정: 03:30 은 미국 업무 시간(KST 23:00~10:00)이라 Gemini 무료 등급이 503 "high demand"
+    # (11/19 · 11/24 · 11/25 새벽) · 점심 12:30 은 그대로 (이름 dawn 은 기록 · 명령과 맞추려고 그대로 둠)
+    sched.add_job(lambda: _safe("dawn"), CronTrigger(hour=20, minute=0, jitter=1200, timezone="Asia/Seoul"), id="dawn", **common)
     sched.add_job(lambda: _safe("lunch"), CronTrigger(hour=12, minute=30, jitter=600, timezone="Asia/Seoul"), id="lunch", **common)
-    log.info("crawler_scheduler_started jobs=dawn 03:30 · lunch 12:30 KST")
+    log.info("crawler_scheduler_started jobs=dawn 20:00 · lunch 12:30 KST")
     sched.start()
 
 

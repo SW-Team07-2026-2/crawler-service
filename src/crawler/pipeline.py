@@ -51,6 +51,7 @@ RECENT = timedelta(days=180)           # 이보다 최근 앨범은 트랙 · �
 WEB_EVERY = timedelta(days=7)          # 아티스트마다 웹 검색은 7일에 한 번
 WEB_ARTISTS_PER_RUN = 30               # 한 번 실행에 웹 검색할 아티스트 수 — 나머지는 다음 새벽에 (실행이 너무 길어지지 않게)
 TICKET_SEARCHES = 10                   # 한 번 실행에 예매 오픈 찾기에 쓸 검색 크레딧 (11/22 8 → 10) — 나머지는 아티스트 조사에
+TICKET_SOON = timedelta(days=7)        # 시작이 이보다 가까운 공연은 예매가 이미 열렸을 때가 많아 예매 오픈 찾기에서 맨 뒤로 (11/25)
 SEARCH_NAMES = 3                       # 김밥레코즈 검색어로 쓸 이름 수 (한글 이름 먼저)
 MAX_TRIES = 6                          # 다시 하기(retry)에서 이만큼 실패하면 더 하지 않음 — 행은 남겨 둠 (한도로 못 한 것은 세지 않음)
 ARTIST_ASK = 2                         # 아티스트마다 Gemini 에 묻는 것 — 11/23 장르 → 장르 + 한글 이름 · 11/24 + 인디 여부 (올리면 모든 아티스트를 한 번 다시 물음)
@@ -271,7 +272,8 @@ class Pipeline:
     def _tickets(self):
         """KOPIS 에 일반 예매 오픈 일시가 없는 인디 공연 → 웹 검색. 출처는 후보의 evidence 로 관리자에게.
         11/18 공연 정리와 나눔 — 검색 크레딧이 적어(Tavily 무료 월 1,000) 아직 안 한 공연 중 시작이 가까운 것부터
-        TICKET_SEARCHES 안에서만 하고, 못 한 것은 다음 실행에 이어서. 원문(input_hash)이 같으면 한 번만 찾습니다 (ticket://<공연 id> 표시)."""
+        TICKET_SEARCHES 안에서만 하고, 못 한 것은 다음 실행에 이어서. 원문(input_hash)이 같으면 한 번만 찾습니다 (ticket://<공연 id> 표시).
+        11/25 시작이 7일(TICKET_SOON) 안인 공연은 맨 뒤로 — 예매가 이미 열렸을 때가 많은데 가까운 것부터라 크레딧이 거기에 먼저 갔음."""
         if self.searcher is None:
             return
         with self.sessions() as s:
@@ -285,9 +287,10 @@ class Pipeline:
                 if starts and datetime.fromisoformat(starts) < datetime.now(timezone.utc):
                     continue                                                 # 이미 시작한 공연은 찾지 않음
                 if c.get("bookingOpenAt") is None and done.get(f"ticket://{i.key}") != i.input_hash:
-                    todo.append((starts or "9999", i.key))
+                    soon = bool(starts) and datetime.fromisoformat(starts) < datetime.now(timezone.utc) + TICKET_SOON
+                    todo.append((soon, starts or "9999", i.key))
         first = getattr(self.searcher, "searches", 0)
-        for n, (_, mt20id) in enumerate(sorted(todo)):
+        for n, (_, _, mt20id) in enumerate(sorted(todo)):
             if getattr(self.searcher, "exhausted", False) or getattr(self.searcher, "searches", 0) - first >= TICKET_SEARCHES:
                 self.stats["concert_ticket_deferred"] += len(todo) - n      # 다음 실행에
                 return
@@ -362,7 +365,7 @@ class Pipeline:
 
     def retry(self, names: bool = True):
         """실행 끝 — 못 끝낸 것(이번 실행 · 앞선 실행)을 한 번 더. 그래도 남으면 다음 실행 맨 앞에.
-        공연은 Gemini 가 하루 한도에 걸려 있으면 하지 않음 (다음 실행에)."""
+        공연은 Gemini 가 하루 한도에 걸려 있으면 하지 않음 (다음 실행에). 판단을 못 한 아티스트도 다시 물음 (_reask · 점심 실행도)."""
         todo = self.retry_names() if names else []
         if todo:
             self.stats["retry_pass_names"] += len(todo)
@@ -370,11 +373,36 @@ class Pipeline:
         if self._retries("CONCERT") and not getattr(self.llm, "exhausted", False):
             self.stats["retry_pass_concerts"] += 1
             self.concerts()
+        self._reask()
         with self.sessions() as s:
             tries = s.scalars(select(dbm.Retry.tries)).all()
         self.stats["retry_left"] = sum(1 for t in tries if t < MAX_TRIES)
         if any(t >= MAX_TRIES for t in tries):
             self.stats["retry_gave_up"] = sum(1 for t in tries if t >= MAX_TRIES)
+
+    def _reask(self):
+        """Gemini 가 응답하지 않아 판단(인디 여부 · 장르 · 한글 이름)을 못 한 아티스트를 MusicBrainz id 로 다시 불러 물음.
+        11/24 · 11/25 새벽 503 으로 168팀이 판단 없이 남았는데, 점심 실행은 공연만 해서 다음 새벽까지 그대로였음 (11/25).
+        MusicBrainz 는 캐시(7일)라 요청이 거의 나가지 않음 · Gemini 가 쉬는 중(llm.exhausted)이면 남은 팀은 다음 실행에."""
+        if self.llm is None:
+            return
+        with self.sessions() as s:
+            keys = set(s.scalars(select(dbm.Item.key).where(dbm.Item.type == "ARTIST", dbm.Item.input_hash == "not-judged")))
+            links = s.execute(select(dbm.ArtistLink.site_id, dbm.ArtistLink.key).where(
+                dbm.ArtistLink.site == "musicbrainz", dbm.ArtistLink.key.in_(keys)).order_by(dbm.ArtistLink.id)).all() if keys else []
+        for n, (mbid, _) in enumerate(links):
+            if getattr(self.llm, "exhausted", False):
+                self.stats["artist_reask_deferred"] += len(links) - n
+                break
+            try:
+                self._load(musicbrainz.artist(self.http, mbid))
+                self.stats["artist_reask"] += 1
+            except Exception as e:
+                self._fail("artist_reask", mbid, e)
+        with self.sessions() as s:
+            left = s.scalars(select(dbm.Item.key).where(dbm.Item.type == "ARTIST", dbm.Item.input_hash == "not-judged")).all()
+        if left:
+            self.stats["artist_not_judged_left"] = len(left)
 
     def _retries(self, kind: str) -> dict[str, str]:
         """{key: value} — 실패 횟수가 MAX_TRIES 보다 적은 것만, 먼저 실패한 순"""
@@ -457,7 +485,10 @@ class Pipeline:
             try:
                 physical = discogs.physical_by_title(self.http, self.settings.discogs_token, mb["discogs"])
             except Exception as e:   # 피지컬만 건너뜀 (None = Catalog 가 건드리지 않음) — 11/19 지워진 Discogs 아티스트(404)로 아티스트 전체가 빠졌음
-                self._fail("discogs", mb["discogs"], e)
+                if notify.error_code(e) == "HTTP 404":   # 11/25 지워진 Discogs 아티스트(안치환)는 연결이 없는 것과 같음 — 실행마다 오류로 알리지 않음
+                    self.stats["discogs_gone"] += 1
+                else:
+                    self._fail("discogs", mb["discogs"], e)
         elif self.settings.discogs_token:
             self.stats["discogs_no_link"] += 1          # MusicBrainz 에 Discogs 연결이 없으면 피지컬은 건드리지 않음
 
@@ -792,13 +823,34 @@ def _display_name(mb_name: str, korean: str | None) -> str:
 
 def _same_album(title: str, titles: list[str]) -> str | None:
     """찾은 제목이 가리키는 앨범 제목 — 정규화해 같으면 그것, 아니면 한쪽이 다른 쪽을 품는 것(4자 이상)이 하나뿐일 때만
-    ('정규 2집 POWER ANDRE 99' → 'POWER ANDRE 99'). 여럿이거나 없으면 None (붙이지 않음)."""
+    ('정규 2집 POWER ANDRE 99' → 'POWER ANDRE 99'). 그래도 없으면 '정규 3집' · 'EP' 같은 앞말과 괄호 뒤를 떼고 같은 것이
+    하나뿐일 때만 (11/25 김밥레코즈 '3집 헤븐' → '헤븐 (Heaven)' · 'EP 동물' → '동물'). 여럿이거나 없으면 None (붙이지 않음)."""
     t = norm(title)
     exact = [x for x in titles if norm(x) == t]
     if exact:
         return exact[0]
     hits = [x for x in titles if min(len(norm(x)), len(t)) >= 4 and (norm(x) in t or t in norm(x))]
-    return hits[0] if len(hits) == 1 else None
+    if len(hits) == 1:
+        return hits[0]
+    forms = _title_forms(title)
+    same = list(dict.fromkeys(x for x in titles if _title_forms(x) & forms))
+    return same[0] if len(same) == 1 else None
+
+
+_EDITION_PREFIX = re.compile(r"^(?:(?:정규|미니|싱글|EP)(?=[\s\d])\s*)?(?:\d+\s*집\s*)?(?:(?:정규|미니|싱글|EP)(?=\s)\s*)?[:\-]?\s*", re.I)
+_EDITION_SUFFIX = re.compile(r"\s*(?:GSI Edition|\d+(?:st|nd|rd|th) Anniversary Edition)$", re.I)
+_VERSION = re.compile(r"remix|remake|live|acoustic|inst|remaster|version|demo|sped|리믹스|리메이크|라이브|어쿠스틱|버전", re.I)
+
+
+def _title_forms(title: str) -> set[str]:
+    """같은 앨범인지 볼 제목 꼴 — 그대로 · 앞말('정규 3집' · 'EP 2집' · '1집 -') · 판 이름('GSI Edition' · '10th Anniversary Edition')을 뗀 것 ·
+    괄호 앞 (괄호가 다른 판(Acoustic · Remix · Live …)을 말하면 빼지 않음 — '5.0 (Acoustic)' 은 '5.0' 이 아님)"""
+    core = _EDITION_SUFFIX.sub("", _EDITION_PREFIX.sub("", title)).strip() or title
+    forms = {title, core}
+    paren = core.find("(")
+    if paren > 0 and not _VERSION.search(core[paren:]):
+        forms.add(core[:paren])
+    return {norm(f) for f in forms if norm(f)}
 
 
 def _physicals(from_discogs: list | None, found: list[dict]) -> tuple[list | None, list[dict]]:
