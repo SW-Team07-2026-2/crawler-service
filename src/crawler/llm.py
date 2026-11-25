@@ -8,8 +8,10 @@
   (도구 결과를 기록해 지어낸 출처를 거르기 위해 · sources/websearch.py).
 - 무료 등급 한도: 분당 요청 수를 넘지 않게 호출 사이를 띄우고, 429 는 API 가 알려 준 시간만큼 쉬었다가 다시.
   하루 한도(PerDay)를 다 쓰면 이번 실행의 남은 호출은 모두 건너뜁니다 (LlmSkip("quota") — 다음 실행에 이어서).
-  서버 오류(500 · 503 · 504)는 1 · 2 · 4 · 8분 쉬며 다시 부르고, 그래도 계속되면 똑같이 남은 호출을 건너뜁니다 (LlmSkip("unavailable") ·
+  서버 오류(500 · 503 · 504)는 1 · 2 · 4 · 8분 쉬며 다시 부르고, 그래도 계속되면 20분 동안 호출을 건너뜁니다 (LlmSkip("unavailable") ·
   11/19 503 "high demand" 가 20분 이어져 공연 단계 전체가 멈췄음 — 다른 단계는 끝까지 돌고 남은 것은 다음 실행에).
+  20분이 지나면 한 번 다시 불러 보고(1분 쉬고 한 번 더), 되면 이어서 · 안 되면 또 20분 (11/24 · 11/25 새벽 503 한 번에 실행 끝까지
+  Gemini 를 안 불러 아티스트 168팀을 못 물었음).
 """
 import json
 import logging
@@ -28,6 +30,7 @@ MAX_TOKENS = 16000     # 생각 토큰 포함
 GAP = 6.5              # 호출 사이 최소 간격(초) — 무료 등급 분당 10건 안팎 (공식 수치 비공개 · 11/18 사용자 측정 보고 기준)
 TRIES = 4              # 분당 한도(429) 때 다시 부르는 횟수
 SERVER_WAITS = (60, 120, 240, 480)   # 서버 오류(500 · 503 · 504) 때 쉬는 시간(초) — 11/19 503 혼잡이 20분 띄엄띄엄 이어짐 (느려도 괜찮음 · 11/17)
+COOLDOWN = 1200        # 서버 오류가 그래도 이어지면 이만큼(초) 부르지 않음 → 그 뒤 다시 불러 봄 (11/25)
 TURNS = 16             # 웹 조사 한 번에 모델이 도구를 부르는 최대 차례
 
 
@@ -121,16 +124,23 @@ CONCERT_SYSTEM = """KOPIS 공연 상세(JSON)와 그 공연의 포스터 · 소�
 
 
 class Llm:
-    def __init__(self, api_key: str | None, model: str, client=None, sleep=time.sleep, gap: float = GAP):
+    def __init__(self, api_key: str | None, model: str, client=None, sleep=time.sleep, gap: float = GAP, clock=time.monotonic):
         self.client = client or genai.Client(api_key=api_key)
         self.model = model
         self.input_tokens = 0
         self.output_tokens = 0          # 생각 토큰 포함
-        self.exhausted = False          # 하루 한도를 다 씀 · 서버가 계속 응답 못 함 → 이번 실행의 남은 호출은 건너뜀
         self.stop_reason = "quota"      # exhausted 의 이유: quota · unavailable
+        self._quota = False             # 하루 한도를 다 씀 → 이번 실행의 남은 호출은 건너뜀
+        self._down_until: float | None = None   # 서버가 계속 응답 못 함 → 이 시각(clock)까지 건너뛰고, 지나면 다시 불러 봄
         self._sleep = sleep
+        self._clock = clock
         self._gap = gap
         self._last: float | None = None
+
+    @property
+    def exhausted(self) -> bool:
+        """지금 부르면 안 됨 — 하루 한도(이번 실행 끝까지) · 서버가 계속 응답 못 함(COOLDOWN 동안)"""
+        return self._quota or (self._down_until is not None and self._clock() < self._down_until)
 
     def extract(self, system: str, content: str | list, schema: dict) -> dict:
         """content: 글 또는 [이미지 Part …, 글 Part]"""
@@ -166,6 +176,7 @@ class Llm:
     def _generate(self, contents, config):
         if self.exhausted:
             raise LlmSkip(self.stop_reason)
+        waits = SERVER_WAITS[:1] if self._down_until is not None else SERVER_WAITS   # 쉬고 난 뒤 다시 불러 볼 때는 1분만 더
         limited = busy = 0                             # 분당 한도 · 서버 오류로 다시 부른 횟수
         while True:
             self._wait()
@@ -173,28 +184,31 @@ class Llm:
                 r = self.client.models.generate_content(model=self.model, contents=contents, config=config)
             except errors.APIError as e:
                 if e.code == 429 and "PerDay" in str(e):
-                    self.exhausted = True
+                    self._quota, self.stop_reason = True, "quota"
                     log.warning("llm_daily_quota_exhausted model=%s", self.model)
                     raise LlmSkip("quota") from None
                 if e.code == 429 and limited < TRIES - 1:
                     self._sleep(_retry_after(e) or 15 * 2 ** limited)
                     limited += 1
                     continue
-                if e.code in (500, 503, 504) and busy < len(SERVER_WAITS):
-                    self._sleep(SERVER_WAITS[busy])
+                if e.code in (500, 503, 504) and busy < len(waits):
+                    self._sleep(waits[busy])
                     busy += 1
                     continue
                 if e.code == 429:
-                    self.exhausted = True
+                    self._quota, self.stop_reason = True, "quota"
                     raise LlmSkip("quota") from None
                 if e.code in (500, 503, 504):
-                    self.exhausted, self.stop_reason = True, "unavailable"
-                    log.warning("llm_unavailable model=%s error=%s", self.model, str(e)[:300])
+                    self._down_until, self.stop_reason = self._clock() + COOLDOWN, "unavailable"
+                    log.warning("llm_unavailable model=%s retry_in=%ss error=%s", self.model, COOLDOWN, str(e)[:300])
                     raise LlmSkip("unavailable") from None
                 if e.code == 400:                      # 그 요청만 문제 (이미지 · 글) — 실행 전체를 멈추지 않음
                     log.warning("llm_rejected model=%s error=%s", self.model, str(e)[:300])
                     raise LlmSkip("rejected") from None
                 raise                                  # 401 · 403 등 설정 문제 — 실행을 멈추고 기록
+            if self._down_until is not None:
+                log.info("llm_available_again model=%s", self.model)
+                self._down_until = None
             self._count(r)
             if r.prompt_feedback is not None and r.prompt_feedback.block_reason:
                 raise LlmSkip("blocked")
