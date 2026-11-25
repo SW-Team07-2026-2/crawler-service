@@ -11,6 +11,8 @@
 - MusicBrainz 밖에서 찾기 (11/18): 인디스트릿(신보) · 김밥레코즈(LP · CD · 카세트) · 웹 검색(신보 · 피지컬 · 공식 굿즈, 7일마다).
   찾은 것은 found 에 쌓고 출처(evidence)를 붙여 후보에 넣습니다. MusicBrainz 값이 있으면 그쪽이 이깁니다(같은 앨범은 MusicBrainz 앨범으로).
   이미지 · 트랙 태그 · 판매가 · 재고는 관리자가 넣는 값이라 null 로 보냅니다 (11/18 — Catalog 는 null 이면 저장된 값을 그대로 둠).
+- 소개 글 (11/25): 아티스트 bio · 앨범 description 을 한국어 위키백과(없으면 웹 검색 1번)의 사실로 Gemini 가 쓰고 문장마다 출처와 대조합니다.
+  출처가 없으면 빈칸 — 관리자가 승인할 때 씁니다. 저녁 · 점심 실행 모두 (describe).
 - 보낸 것은 전부 Studio 에서 관리자 승인을 기다립니다. 같은 아티스트면 Gemini 장르를 다시 묻지 않고, 결과가 그대로면 다시 보내지 않습니다.
 """
 import hashlib
@@ -24,12 +26,14 @@ from urllib.parse import urlsplit
 from sqlalchemy import delete, select
 
 from . import db as dbm
+from . import describe as desc
 from . import images as imgs
+from . import llm as llms
 from . import notify
 from .enums import ARTIST_COMPOSITIONS, ARTIST_GENDERS
 from .keys import HANGUL, LATIN, content_hash, norm
 from .llm import LlmSkip
-from .sources import discogs, gimbab, indistreet, kopis, musicbrainz
+from .sources import discogs, gimbab, indistreet, kopis, musicbrainz, wikipedia
 from .studio import StudioRejected
 from .webtools import SearchQuota
 
@@ -55,6 +59,13 @@ TICKET_SOON = timedelta(days=7)        # 시작이 이보다 가까운 공연은
 SEARCH_NAMES = 3                       # 김밥레코즈 검색어로 쓸 이름 수 (한글 이름 먼저)
 MAX_TRIES = 6                          # 다시 하기(retry)에서 이만큼 실패하면 더 하지 않음 — 행은 남겨 둠 (한도로 못 한 것은 세지 않음)
 ARTIST_ASK = 2                         # 아티스트마다 Gemini 에 묻는 것 — 11/23 장르 → 장르 + 한글 이름 · 11/24 + 인디 여부 (올리면 모든 아티스트를 한 번 다시 물음)
+# 11/25 소개 글 (describe) — 아티스트 bio 3~4문장 · 앨범 description 2~3문장 (한글)
+DESCRIBE_VERSION = 1                   # 만드는 방식(프롬프트 · 출처 · 검사)이 바뀌면 올림 → 다시 만듦 (관리자가 쓴 글은 Catalog 가 지킴 · 빈 칸만 채움)
+DESCRIBE_ARTISTS = 40                  # 한 번 실행에 Gemini 로 소개 글을 쓸 아티스트 수 (11/25 실제 시험 한 팀 입력 1~2천 · 출력 6백 토큰) — 나머지는 다음 실행에 (새벽 · 점심 모두)
+DESCRIBE_ALBUMS = 40                   # 같은 것 · 앨범 (출처가 없는 앨범은 Gemini 를 부르지 않아 세지 않음)
+DESCRIBE_SEARCHES = 15                 # 한 번 실행에 소개 글 출처 찾기(위키백과 문서가 없을 때)에 쓸 검색 크레딧
+DESCRIBE_AGAIN = timedelta(days=30)    # 출처가 없거나 못 쓴 것은 이만큼 지나 한 번 더
+DESCRIBE_LIVE = ("READY", "SENT", "HOLD", "FAILED")   # 소개 글을 쓰는 후보 상태 (뺀 SKIPPED 는 쓰지 않음)
 
 
 class Pipeline:
@@ -72,6 +83,7 @@ class Pipeline:
         self._web_left = WEB_ARTISTS_PER_RUN
         self.failures: dict[str, dict] = {}   # 11/24 알림용 — what → {count, codes: {코드: 수}, samples: [(항목, 내용)] 몇 개}
         self.reviewed: dict[tuple[str, str], str] = {}   # (CONCERT · ARTIST · ALBUM, external_id) → REJECTED · APPROVED · CHANGED (load_reviewed)
+        self._articles: dict[str, dict | None] = {}     # 11/25 아티스트 키 → 한국어 위키백과 문서 (이번 실행 · 앨범 소개 글에도 씀)
 
     def load_reviewed(self):
         """11/24 관리자가 처리한 후보 (Studio GET /internal/crawl/reviewed) — 실행 처음에 한 번.
@@ -537,6 +549,7 @@ class Pipeline:
             }
             if goods_evidence:
                 artist["evidence"] = goods_evidence      # 출처 — 관리자 확인용 (Studio 가 Catalog 로 보낼 때 뺌)
+            artist = self._with_description(s, artist, "ARTIST", key)   # 11/25 만들어 둔 소개 글 (describe)
             # 장르를 한 번도 정하지 못한 아티스트는 보내지 않고 기다림 (HOLD — 앨범도 아티스트가 간 뒤에) · 11/19 한도 소진으로 장르 없이 22팀이 갔음
             # 11/24 indig 가 다루지 않는 아티스트(대중 · 힙합)는 SKIPPED — 보내지 않고 앨범도 만들지 않음 (공연은 send 에서 라인업으로 한 번 더)
             self._upsert(s, "ARTIST", key, artist, identity if judged else "not-judged",
@@ -585,6 +598,7 @@ class Pipeline:
                 album["physical_albums"], physical_evidence = _physicals(from_discogs, per_album.get(album["title"], []))
                 if evidence or physical_evidence:
                     album["evidence"] = evidence + physical_evidence
+                album = self._with_description(s, album, "ALBUM", album["external_id"])
                 self._upsert(s, "ALBUM", album["external_id"], album, input_hash, origin=origin)
             s.commit()
         self.stats["artist_ok"] += 1
@@ -707,6 +721,154 @@ class Pipeline:
             self.stats[f"artist_llm_{e}"] += 1
             return None
 
+    # ---------- 소개 글 (11/25) ----------
+
+    def describe(self):
+        """아티스트 bio · 앨범 description (한글) — 새벽 · 점심 실행 모두 (전송 전 · 11/25 사용자).
+        출처: 한국어 위키백과(MusicBrainz 의 Wikidata 연결 → kowiki) → 없으면 웹 검색 1번 (아티스트 · 피지컬 판본이 있는 앨범).
+        Gemini 가 출처 사실로 쓰고, 문장마다 출처와 대조해 거릅니다 (describe.checked). 출처가 없거나 남은 문장이 모자라면 null —
+        후보에 빈칸으로 가서 관리자가 승인할 때 씁니다. 한 번 쓴 글은 다시 쓰지 않음 (DESCRIBE_VERSION) · Gemini · 검색 한도면 다음 실행에."""
+        if self.llm is None:
+            return
+        left = {"ARTIST": DESCRIBE_ARTISTS, "ALBUM": DESCRIBE_ALBUMS, "search": DESCRIBE_SEARCHES}
+        with self.sessions() as s:
+            done = {(d.kind, d.key): d for d in s.scalars(select(dbm.Description))}
+            items = s.scalars(select(dbm.Item).where(dbm.Item.type.in_(("ARTIST", "ALBUM")), dbm.Item.status.in_(DESCRIBE_LIVE))
+                              .order_by(dbm.Item.id)).all()
+            mbids: dict[str, str] = {}
+            for site_id, key in s.execute(select(dbm.ArtistLink.site_id, dbm.ArtistLink.key)
+                                          .where(dbm.ArtistLink.site == "musicbrainz").order_by(dbm.ArtistLink.id)):
+                mbids.setdefault(key, site_id)
+        artists = {i.key: json.loads(i.payload_json) for i in items if i.type == "ARTIST"}
+        for type_ in ("ARTIST", "ALBUM"):
+            for item in items:
+                if item.type != type_ or not _due(done.get((type_, item.key))):
+                    continue
+                payload = json.loads(item.payload_json)
+                owner = item.key if type_ == "ARTIST" else payload["artist_ref"]["external_id"]
+                if owner not in artists:
+                    continue                             # 아티스트를 뺐거나(SKIPPED) 아직 없음
+                if getattr(self.llm, "exhausted", False) or left[type_] <= 0:
+                    self.stats[f"describe_{type_.lower()}_deferred"] += 1
+                    continue
+                try:
+                    if type_ == "ARTIST":
+                        result = self._bio(payload, mbids.get(item.key), left)
+                    else:
+                        result = self._album_description(payload, artists[owner], owner, mbids.get(owner), left)
+                except LlmSkip as e:
+                    self.stats[f"describe_llm_{e}"] += 1
+                    continue
+                except SearchQuota:
+                    self.stats[f"describe_{type_.lower()}_deferred"] += 1
+                    continue
+                except Exception as e:
+                    self._fail("describe", item.key, e)
+                    continue
+                if result is None:                       # 검색 몫을 다 써서 출처를 못 찾음 — 다음 실행에
+                    self.stats[f"describe_{type_.lower()}_deferred"] += 1
+                    continue
+                text, evidence, reason = result
+                self.stats[f"describe_{type_.lower()}_{'written' if text else reason}"] += 1
+                self._save_description(type_, item.key, text, evidence, reason)
+
+    def _bio(self, artist: dict, mbid: str | None, left: dict):
+        """→ (글 또는 None, 출처, null 인 까닭) · 검색 몫이 없어 못 찾았으면 None"""
+        mb = musicbrainz.artist(self.http, mbid) if mbid else None
+        article = self._article(artist["external_id"], mb)
+        if article is not None:
+            sources = [{"no": 1, "site": "wikipedia", "url": article["url"], "title": article["title"],
+                        "text": wikipedia.readable(article["text"])}]
+        else:
+            sources = self._search_sources(f"{artist['name']} 음악 소개", left)
+            if sources is None:
+                return None
+        if not sources:
+            return None, [], "no_source"
+        albums = [g["title"] for g in musicbrainz.release_groups(self.http, mbid)][-15:] if mbid else []
+        subject = {"artist": {"name": artist["name"], "musicbrainzName": mb["name"] if mb else None,
+                              "aliases": (mb or {}).get("aliases", [])[:10], "label": artist.get("label"), "albums": albums}}
+        left["ARTIST"] -= 1
+        raw = self.llm.describe(llms.BIO_SYSTEM, subject, [{k: x[k] for k in ("no", "site", "title", "text")} for x in sources])
+        banned = set((mb or {}).get("legal_names", [])) | desc.legal_names(x["text"] for x in sources)
+        text, used = desc.checked(raw, sources, max_sentences=4, max_chars=300, min_sentences=2, banned_names=banned)
+        return text, _evidence("bio", sources, used if text else None), None if text else "too_thin"
+
+    def _album_description(self, album: dict, artist: dict, artist_key: str, mbid: str | None, left: dict):
+        """앨범 — 아티스트 위키백과 문서에서 이 앨범을 《제목》 으로 적은 문장 → 없으면 피지컬 판본이 있는 앨범만 웹 검색 1번.
+        0번 출처는 MusicBrainz 값(종류 · 발매일 · 트랙) — 그것만으로는 쓰지 않음 (11/25 사용자: 못 찾으면 빈칸)"""
+        tracks = album.get("tracks") or []
+        facts = (f"아티스트 {artist['name']} · 제목 {album['title']} · 종류 {album['type']} · 발매일 {album.get('released_at') or '모름'}"
+                 + (f" · 트랙 {len(tracks)}곡: " + " / ".join(t["title"] for t in tracks[:30]) if tracks else ""))
+        sources = [{"no": 0, "site": "musicbrainz", "url": None, "title": "facts", "text": facts}]
+        article = self._article(artist_key, musicbrainz.artist(self.http, mbid) if mbid and artist_key not in self._articles else None)
+        lines = wikipedia.sentences_about(article["text"], [album["title"]]) if article else []
+        if lines:
+            sources.append({"no": 1, "site": "wikipedia", "url": article["url"], "title": article["title"], "text": "\n".join(lines)})
+        elif album.get("physical_albums"):
+            found = self._search_sources(f"{artist['name']} {album['title']} 앨범 소개", left)
+            if found is None:
+                return None
+            sources += found
+        if len(sources) == 1:
+            return None, [], "no_source"
+        subject = {"album": {"artist": artist["name"], "title": album["title"], "type": album["type"],
+                             "releasedAt": album.get("released_at"), "trackCount": len(tracks)}}
+        left["ALBUM"] -= 1
+        raw = self.llm.describe(llms.ALBUM_SYSTEM, subject, [{k: x[k] for k in ("no", "site", "title", "text")} for x in sources])
+        # 11/25 실제 시험: 출처 문장이 한두 개면 Gemini 가 한 문장으로 씀 (한로로 《자몽살구클럽》) — 출처가 있는 한 문장도 받음
+        text, used = desc.checked(raw, sources, max_sentences=3, max_chars=200, min_sentences=1,
+                                  banned_names=desc.legal_names(x["text"] for x in sources), facts_no=0)
+        return text, _evidence("description", sources[1:], (used - {0}) if text else None), None if text else "too_thin"
+
+    def _article(self, artist_key: str, mb: dict | None) -> dict | None:
+        """아티스트의 한국어 위키백과 문서 — 이번 실행 안에서는 한 번만 (앨범마다 다시 부르지 않음)"""
+        if artist_key not in self._articles:
+            self._articles[artist_key] = wikipedia.article_for(self.http, (mb or {}).get("wikidata"))
+        return self._articles[artist_key]
+
+    def _search_sources(self, query: str, left: dict) -> list[dict] | None:
+        """웹 검색 1번 → 출처 [{no, site, url, title, text}] (1번부터) · 검색을 못 하면(키 없음) [] · 이번 몫을 다 썼으면 None"""
+        if self.searcher is None:
+            return []
+        if left["search"] <= 0 or getattr(self.searcher, "exhausted", False):
+            return None
+        left["search"] -= 1
+        self.stats["describe_search"] += 1
+        return [{"no": n, "site": "websearch", "url": p["url"], "title": p["title"], "text": p["text"]}
+                for n, p in enumerate(self.searcher.read_results(query), start=1)]
+
+    def _save_description(self, type_: str, key: str, text: str | None, evidence: list[dict], reason: str | None):
+        """저장하고 후보에 바로 넣음 — 바뀌었으면 READY (이번 실행에 보냄 · 장르를 기다리는 HOLD 는 그대로)"""
+        with self.sessions() as s:
+            row = s.scalar(select(dbm.Description).where(dbm.Description.kind == type_, dbm.Description.key == key))
+            if row is None:
+                row = dbm.Description(kind=type_, key=key)
+                s.add(row)
+            row.text, row.evidence_json, row.reason = text, json.dumps(evidence, ensure_ascii=False), reason
+            row.version, row.checked_at = DESCRIBE_VERSION, dbm.now()
+            s.flush()
+            item = self._item(s, type_, key)
+            payload = self._with_description(s, json.loads(item.payload_json), type_, key)
+            self._upsert(s, type_, key, payload, item.input_hash, origin=item.origin,
+                         status="HOLD" if item.status == "HOLD" else "READY")
+            s.commit()
+
+    @staticmethod
+    def _with_description(s, payload: dict, type_: str, key: str) -> dict:
+        """후보에 저장된 소개 글 · 출처를 넣은 새 값 (아티스트 bio · 앨범 description) — 글이 없으면 칸을 빼서 null (관리자가 씀)"""
+        field = "bio" if type_ == "ARTIST" else "description"
+        row = s.scalar(select(dbm.Description).where(dbm.Description.kind == type_, dbm.Description.key == key))
+        evidence = [e for e in payload.get("evidence") or [] if e.get("for") != field]
+        out = {k: v for k, v in payload.items() if k not in (field, "evidence")}
+        if row is not None and row.text:
+            out[field] = row.text
+        if row is not None:
+            evidence += json.loads(row.evidence_json)
+        if evidence:
+            out["evidence"] = evidence
+        return out
+
     # ---------- 전송 ----------
 
     def send(self):
@@ -804,6 +966,18 @@ class Pipeline:
         if len(f["samples"]) < notify.SAMPLES:
             f["samples"].append((str(key)[:120], str(e)[:300]))
         log.warning("crawl_%s_failed item=%s error=%s", what, key, str(e)[:300])   # key= 는 로그 가림 필터가 비밀로 봄 (11/19)
+
+
+def _due(row) -> bool:
+    """소개 글을 (다시) 만들 차례 — 처음 · 만드는 방식이 바뀜 · 출처가 없었거나 못 쓴 지 30일"""
+    return (row is None or row.version != DESCRIBE_VERSION
+            or (row.text is None and row.checked_at < dbm.now() - DESCRIBE_AGAIN))
+
+
+def _evidence(field: str, sources: list[dict], used: set[int] | None) -> list[dict]:
+    """소개 글 출처 — 쓴 출처만 (used) · 못 썼으면(None) 찾은 출처 전부 (관리자가 쓸 때 참고) · 글 앞부분을 quote 로"""
+    return [{"for": field, "site": x["site"], "url": x["url"], "title": x["title"], "quote": " ".join(x["text"].split())[:300]}
+            for x in sources if used is None or x["no"] in used]
 
 
 def _skip_reason(relevance: str, genres: list[str]) -> str | None:

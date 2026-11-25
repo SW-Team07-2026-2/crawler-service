@@ -15,6 +15,7 @@ import json
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from ..enums import ALBUM_TYPES, GOODS_CATEGORIES, OPTION_SIZES, PHYSICAL_FORMATS
 from ..keys import full_date, norm
@@ -28,6 +29,8 @@ PAGE_CHARS = 15000     # open_page 로 보여 줄 페이지 본문 길이 (상�
 RESULT_CHARS = 3000    # 검색 결과마다 보여 줄 본문 앞부분 (검색하면 결과 페이지를 모두 열어 둠 · 11/18 사용자 지시 "싹 찾기")
 KEEP_CHARS = 200000    # 확인용으로 들고 있는 본문 길이 (저장하지 않음)
 QUOTE_CHARS = 300      # 관리자에게 보일 출처 글 길이
+DESCRIBE_CHARS = 4000  # 소개 글 출처로 Gemini 에 보일 페이지 본문 길이 (11/25)
+SKIP_FOR_DESCRIPTION = ("namu.wiki",)
 NAME_CHARS = 500       # 한글 이름 근거로 Gemini 에 보일 검색 본문 조각 길이
 
 SEARCH_TOOL = {"name": "web_search", "description": "웹 검색. 결과 페이지를 모두 열어 주소 · 제목 · 본문 앞부분(content) · 게시일을 돌려줍니다. "
@@ -136,6 +139,19 @@ class WebSearch:
         """11/24 한글 활동명 근거 — '{이름} 가수 앨범' 검색 1번(1크레딧)의 제목 · 본문 조각. 페이지는 열지 않음.
         (11/24 시험: Royal 44 → 로얄44 · Skinny Brown → 스키니브라운 · palecistus → 페일시스터스)"""
         return [f"{r['title']} | {r['content'][:NAME_CHARS]}" for r in self.search.search(f"{name} 가수 앨범")]
+
+    def read_results(self, query: str, skip=SKIP_FOR_DESCRIPTION) -> list[dict]:
+        """11/25 소개 글 출처 — 검색 1번(1크레딧) → 결과 페이지 본문 [{url, title, text, snippet}] (못 연 페이지는 검색 조각).
+        skip: 쓰지 않는 사이트 — 나무위키는 비영리 조건(CC BY-NC-SA)이라 판매가 있는 서비스의 소개 글 출처로 쓰지 않음"""
+        out = []
+        for h in self.search.search(query):
+            host = (urlsplit(h["url"]).hostname or "").lower()
+            if any(host == d or host.endswith("." + d) for d in skip):
+                continue
+            text = (self._read(h["url"]) or h["content"] or "").strip()
+            if text:
+                out.append({"url": h["url"], "title": h["title"], "text": text[:DESCRIBE_CHARS], "snippet": h["content"]})
+        return out
 
     def releases(self, artist: dict) -> list[dict]:
         """[{title, type(없으면 None), released_at, evidence, formats: [{format, name, released_at, pre_order, vinyl_color, reference_price, evidence}]}]"""

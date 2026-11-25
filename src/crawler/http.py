@@ -20,7 +20,9 @@ log = logging.getLogger(__name__)
 
 # MusicBrainz 의 robots.txt 는 검색 로봇용으로 /ws 를 막지만, API 이용 정책(doc/MusicBrainz_API/Rate_Limiting)이
 # 앱의 사용을 허락합니다 — 조건: IP 당 평균 초당 1건 · 연락처가 든 User-Agent · 정해진 시각에 몰아서 부르지 않기.
-API_POLICY = {("musicbrainz.org", "/ws/2/"): 1.5}   # 초당 1건보다 넉넉히 (1.1초 간격에서도 503 이 났음)
+API_POLICY = {("musicbrainz.org", "/ws/2/"): 1.5,   # 초당 1건보다 넉넉히 (1.1초 간격에서도 503 이 났음)
+              # 11/25 Wikimedia — robots.txt 는 /w/ 를 막지만 API 이용 정책(API:Etiquette)이 연락처 든 User-Agent 로 차례로 읽기를 허락
+              ("www.wikidata.org", "/w/api.php"): 1.0, ("ko.wikipedia.org", "/w/api.php"): 1.0}
 # 잠깐 오류(400 · 5xx)를 주다가 곧 돌아오는 사이트 — 오류면 이만큼(초) 쉬었다가 다시 (11/19 KOPIS: 03:43 목록 · 10:17 상세 8건이 400 등,
 # 같은 주소를 다시 부르면 200). 그래도 안 되면 그 항목만 실패 → 다음 실행에
 RETRY_LATER = {"www.kopis.or.kr": (30, 60)}
