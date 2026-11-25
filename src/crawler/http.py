@@ -25,7 +25,8 @@ API_POLICY = {("musicbrainz.org", "/ws/2/"): 1.5}   # 초당 1건보다 넉넉�
 # 같은 주소를 다시 부르면 200). 그래도 안 되면 그 항목만 실패 → 다음 실행에
 RETRY_LATER = {"www.kopis.or.kr": (30, 60)}
 # 사이트별 최소 간격(초) — 11/20~22 KOPIS 가 1초 간격 연속 요청을 수시로 막음(400 "Request Blocked" · 새벽 실행마다 18~19번 · 11/22 는 목록부터)
-HOST_INTERVAL = {"www.kopis.or.kr": 3.0}
+# 11/25 3초에도 막힘 (11/24 점심 112번 · 번마다 30초 넘게 쉼 · 8건 실패) → 5초
+HOST_INTERVAL = {"www.kopis.or.kr": 5.0}
 _SECRET_PARAMS = re.compile(r"(service|token|key)=[^&\s]+", re.I)   # 공백에서 멈춤 — 주소 끝의 키 뒤 상태 · 본문까지 지우던 것 (11/19)
 
 

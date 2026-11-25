@@ -131,6 +131,29 @@ def test_server_error_that_keeps_coming_stops_the_rest_of_the_run_not_the_stage(
     assert len(llm.client.models.requests) == 5
 
 
+def test_server_error_that_keeps_coming_pauses_calls_for_a_while_then_tries_again():
+    """11/24 · 11/25 새벽 503 한 번에 실행 끝까지 Gemini 를 안 불러 아티스트 168팀을 못 물었음 → 20분 쉬고 다시 불러 봄"""
+    busy = lambda: errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
+    now, sleeps = [0.0], []
+    llm = Llm(None, "m", client=fake_client(*[busy() for _ in range(7)], response('{"genres": ["EMO"]}')),
+              sleep=sleeps.append, gap=0, clock=lambda: now[0])
+    requests = llm.client.models.requests
+    with pytest.raises(LlmSkip, match="unavailable"):
+        llm.concert({"detail": {"mt20id": "PF1"}})
+    assert sleeps == [60, 120, 240, 480] and len(requests) == 5 and llm.exhausted
+    now[0] = 1199
+    with pytest.raises(LlmSkip, match="unavailable"):              # 쉬는 동안은 부르지 않음
+        llm.artist_info("A", [], [], None)
+    assert len(requests) == 5
+    now[0] = 1200
+    assert not llm.exhausted
+    with pytest.raises(LlmSkip, match="unavailable"):              # 다시 불러 봄 — 1분 쉬고 한 번 더 · 그래도 안 되면 또 20분
+        llm.artist_info("A", [], [], None)
+    assert sleeps[4:] == [60] and len(requests) == 7 and llm.exhausted
+    now[0] = 2400
+    assert llm.artist_info("B", [], [], None)["genres"] == ["EMO"] and not llm.exhausted
+
+
 def test_server_error_that_passes_within_the_waits_is_just_a_delay():
     busy = lambda: errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
     sleeps = []

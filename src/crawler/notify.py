@@ -12,13 +12,14 @@ from .studio import StudioRejected
 from .webtools import SearchQuota
 
 log = logging.getLogger(__name__)
-KINDS = {"dawn": "새벽", "lunch": "점심"}
+KINDS = {"dawn": "저녁", "lunch": "점심"}   # dawn = 전체 실행 (11/25 03:30 → 20:00)
 TYPES = (("artist", "아티스트"), ("album", "앨범"), ("concert", "공연"))
 # 11/24 항목 오류가 난 곳 (Pipeline._fail 의 what) — 알림에 이름과 함께
 PLACES = {
     "reviewed_fetch": "Studio 처리 목록", "concert_fetch": "KOPIS 공연 상세", "concert_facility": "KOPIS 공연장",
     "concert_image": "공연 포스터 · 소개 이미지", "concert_cast": "출연진 → 팀 (MusicBrainz)", "concert_ticket": "예매 오픈 검색",
     "indistreet": "인디스트릿", "artist": "아티스트 찾기 (MusicBrainz)", "artist_refresh": "아티스트 다시 보기 (MusicBrainz)",
+    "artist_reask": "판단 못 한 아티스트 다시 묻기",
     "discogs": "Discogs 피지컬", "gimbab": "김밥레코즈", "web_search": "웹 조사 (신보 · 굿즈)", "artist_name_search": "한글 이름 검색",
 }
 SAMPLES = 3   # 오류 종류마다 예시 수

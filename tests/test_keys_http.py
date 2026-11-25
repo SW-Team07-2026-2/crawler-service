@@ -102,15 +102,15 @@ def test_kopis_errors_are_retried_later_but_other_sites_are_not(sessions):
     assert [s for s in sleeps if s >= 30] == [30, 60]
 
 
-def test_kopis_requests_are_spaced_three_seconds_apart(sessions):
-    """11/20~22 KOPIS 가 1초 간격 연속 요청을 수시로 막음 → KOPIS 만 3초 간격"""
+def test_kopis_requests_are_spaced_five_seconds_apart(sessions):
+    """11/20~22 KOPIS 가 1초 간격 연속 요청을 수시로 막음 → KOPIS 만 3초 간격 · 11/25 3초에도 막혀 5초"""
     from crawler.http import Http
     from conftest import UA
     sleeps = []
     http = Http(sessions, UA, fetch=lambda u, h: (200, "<dbs/>"), sleep=sleeps.append)
     http.get("kopis", "https://www.kopis.or.kr/openApi/restful/pblprfr/PF1?service=K")
     http.get("kopis", "https://www.kopis.or.kr/openApi/restful/pblprfr/PF2?service=K")
-    assert len(sleeps) == 1 and 2.9 < sleeps[0] <= 3.0
+    assert len(sleeps) == 1 and 4.9 < sleeps[0] <= 5.0
     sleeps.clear()
     http.get("t", "https://other.test/a")
     http.get("t", "https://other.test/b")
