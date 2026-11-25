@@ -77,14 +77,18 @@ def _in_korea(http, area: dict | None, depth: int = 0) -> bool:
 def artist(http, mbid: str) -> dict:
     """discogs: MusicBrainz 편집자가 이어 둔 Discogs 아티스트 id (하나일 때만 — 이름으로 찾으면 동명이인이 섞임)
     legal_names: 별칭 중 본명 (11/23 한글 이름을 고를 때 본명은 쓰지 않음 — ASH ISLAND 의 별칭 윤진영)
-    gender · composition: 11/22 Catalog 필터 값 (lineup 참고) — 확실하지 않으면 None"""
+    gender · composition: 11/22 Catalog 필터 값 (lineup 참고) — 확실하지 않으면 None
+    wikidata: 11/25 MusicBrainz 편집자가 이어 둔 Wikidata 항목 id (Q…) — 소개 글 출처 (sources/wikipedia) · 하나일 때만"""
     a = _get(http, f"artist/{mbid}?inc=aliases+url-rels+artist-rels&fmt=json", days=7)
     links = {r["url"]["resource"].rstrip("/").rsplit("/", 1)[-1] for r in a.get("relations", [])
              if r.get("type") == "discogs" and "/artist/" in r.get("url", {}).get("resource", "")}
+    wikidata = {r["url"]["resource"].rstrip("/").rsplit("/", 1)[-1] for r in a.get("relations", [])
+                if r.get("type") == "wikidata" and "/wiki/Q" in r.get("url", {}).get("resource", "")}
     gender, composition = lineup(http, a)
     return {"mbid": a["id"], "name": a["name"], "aliases": sorted({x["name"] for x in a.get("aliases", [])} - {a["name"]}),
             "legal_names": sorted({x["name"] for x in a.get("aliases", []) if x.get("type") == "Legal name"}),
-            "discogs": links.pop() if len(links) == 1 else None, "gender": gender, "composition": composition}
+            "discogs": links.pop() if len(links) == 1 else None, "gender": gender, "composition": composition,
+            "wikidata": wikidata.pop() if len(wikidata) == 1 else None}
 
 
 GENDERS = {"Male": "MALE", "Female": "FEMALE"}   # Other · Non-binary · Not applicable 은 Catalog 값이 없음 → None

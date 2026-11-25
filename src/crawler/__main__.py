@@ -1,4 +1,4 @@
-"""crawler serve                — 새벽 03:30 · 점심 12:30 (KST) 일정으로 계속 실행 (컨테이너 기본 명령)
+"""crawler serve                — 저녁 20:00(전체 · dawn) · 점심 12:30 (KST) 일정으로 계속 실행 (컨테이너 기본 명령)
 crawler run dawn|lunch [--dry-run]  — 한 번만 실행. --dry-run 은 Studio 로 보내지 않고 크롤러 DB 에만 남김
 실행이 끝나거나 멈추면 Slack 으로 알립니다 (notify.py · dry-run 은 알리지 않음).
 """

@@ -682,8 +682,13 @@ STORE_URL = "https://store.example/silica-tee"
 
 
 class FakeSearcher:
-    def __init__(self, releases=None, goods=None, mentions=None):
+    def __init__(self, releases=None, goods=None, mentions=None, pages=None):
         self.r, self.g, self.m, self.calls = releases or {}, goods or {}, mentions or {}, []
+        self.p = pages or {}                 # 검색어 → 소개 글 출처 페이지 [{url, title, text, snippet}]
+
+    def read_results(self, query):
+        self.calls.append(("read_results", query))
+        return self.p.get(query, [])
 
     def mentions(self, name):
         self.calls.append(("mentions", name))

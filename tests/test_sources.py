@@ -55,7 +55,7 @@ def test_musicbrainz_picks_korean_exact_match_and_filters_groups(sessions):
     http = make_http(sessions, mb_web())
     a = musicbrainz.find_artist(http, "실리카겔")
     assert a == {"mbid": "kr", "name": "Silica Gel", "aliases": ["실리카겔"], "legal_names": [], "discogs": "6588484",
-                 "gender": None, "composition": None}                 # 종류 · 멤버 기록이 없으면 모름
+                 "gender": None, "composition": None, "wikidata": None}   # 종류 · 멤버 기록이 없으면 모름 · Wikidata 연결 없음
     assert musicbrainz.find_artist(http, "실리카") is None          # 이름이 정확히 같지 않으면 만들지 않음
 
     groups = musicbrainz.release_groups(http, "kr")

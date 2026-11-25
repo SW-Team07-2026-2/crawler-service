@@ -59,7 +59,7 @@ def make_http(sessions, web) -> Http:
 
 
 class FakeLlm:
-    def __init__(self, concerts=None, genres=None, names=None, mainstream=(), picks=None):
+    def __init__(self, concerts=None, genres=None, names=None, mainstream=(), picks=None, describes=None):
         self.concerts = concerts or {}      # mt20id → 결과
         self.genres = genres or {}          # 이름 → 장르
         self.names = names or {}            # 이름 → 한글 활동명
@@ -70,6 +70,8 @@ class FakeLlm:
         self.calls: list[str] = []
         self.facts: dict[str, dict] = {}    # mt20id → Haiku 에 넘긴 값
         self.images: dict[str, int] = {}    # mt20id → 이미지 조각 수
+        self.describes = describes or {}    # 아티스트 이름 · 앨범 제목 → 소개 글 문장 [{text, source}]
+        self.described: list[tuple[str, list]] = []   # (이름 · 제목, 넘긴 출처)
         self.input_tokens = self.output_tokens = 0
 
     def concert(self, facts, images=None):
@@ -82,6 +84,12 @@ class FakeLlm:
         self.calls.append(f"pick:{name}")
         self.picked[name] = ([c["id"] for c in candidates], concert)
         return self.picks.get(name)
+
+    def describe(self, system, subject, sources):
+        name = subject["artist"]["name"] if "artist" in subject else subject["album"]["title"]
+        self.calls.append(f"describe:{name}")
+        self.described.append((name, sources))
+        return copy.deepcopy(self.describes.get(name, []))
 
     def artist_info(self, name, aliases, albums, label, legal_names=(), web=()):
         self.calls.append(f"artist:{name}")
