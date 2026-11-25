@@ -59,6 +59,12 @@ PICK_SYSTEM = """공연 출연진 이름 하나가 MusicBrainz 에서 같은 이
 
 PICK_SCHEMA = _obj({"id": {"type": "string", "description": "고른 후보의 id · 확실하지 않으면 빈 문자열"}})
 
+# 11/25 소개 글 — 문장마다 근거 출처 번호 (코드가 숫자 · 제목 · 개인정보를 출처와 대조 · describe.py)
+DESCRIBE_SCHEMA = _obj({"sentences": {"type": "array", "items": _obj({
+    "text": {"type": "string"},
+    "source": {"type": "integer", "description": "이 문장의 근거가 된 sources 의 번호(no)"},
+})}})
+
 CONCERT_SCHEMA = _obj({
     "relevance": {"type": "string", "enum": ["INDIE", "MAINSTREAM", "HIPHOP", "NOT_CONCERT"]},
     "title": {"type": "string"},
@@ -98,6 +104,24 @@ ARTIST_SYSTEM = """indig 에서 다룰 아티스트인지와 장르 · 한글 �
   다만 본명으로 활동하면(name 이 legalNames 에 있음 — Moon Sujin → 문수진) 한글 본명이 활동명입니다.
   검색 결과에는 같은 이름의 다른 사람이나 함께 적힌 다른 아티스트도 나옵니다 — 앨범 · 레이블로 이 아티스트를 가리키는 표기인지 확인합니다.
 결과는 관리자가 확인한 뒤 서비스에 들어갑니다."""
+
+DESCRIBE_RULES = """
+- 한국어 합니다체(…입니다 · …했습니다)로 씁니다.
+- 출처(sources)에 적힌 사실만 씁니다. 출처에 없는 내용 · 추측 · 평가하는 꾸밈말(최고의 · 독보적인 · 감성적인 · 주목받는 등)은 쓰지 않습니다.
+  출처 문장을 그대로 옮기지 말고 사실만 골라 새 문장으로 씁니다.
+- 이런 것은 쓰지 않습니다: 본명 · 생년월일 · 나이 · 태어난 곳 · 학교 · 가족 · 연애 · 결혼 · 병역 · 건강 · 사건 · 논란 · 소송.
+- 출처가 이 아티스트(이름 · 앨범 · 레이블로 확인)에 대한 글이 아니면 쓰지 않습니다 — 같은 이름의 다른 사람 · 다른 작품이 흔합니다.
+- 문장마다 근거가 된 출처 번호(source)를 붙입니다. 쓸 만한 사실이 모자라면 문장 수를 줄이고, 없으면 빈 목록을 돌려줍니다 — 관리자가 직접 씁니다.
+결과는 관리자가 출처와 함께 확인한 뒤 서비스에 들어갑니다."""
+
+BIO_SYSTEM = """indig(한국 인디 음악 플랫폼) 아티스트 상세 화면에 들어갈 짧은 소개 글을 씁니다.
+- 3~4문장 · 모두 합쳐 300자 안쪽. 쓸 만한 것: 언제 · 어디서 결성(데뷔)했는지, 구성(몇 인조 · 솔로), 음악 장르, 대표 앨범 · 곡, 레이블, 수상.
+- artist 는 MusicBrainz 의 값(이름 · 별칭 · 앨범 · 레이블)으로, 출처가 이 아티스트에 대한 것인지 확인하는 데 씁니다.""" + DESCRIBE_RULES
+
+ALBUM_SYSTEM = """indig(한국 인디 음악 플랫폼) 앨범 상세 화면에 들어갈 짧은 소개 글을 씁니다.
+- 2~3문장 · 모두 합쳐 200자 안쪽. 쓸 만한 것: 몇 번째 앨범인지, 언제 냈는지, 어떤 곡 · 주제를 담았는지, 수상 · 기록.
+- album 은 MusicBrainz 의 값(제목 · 종류 · 발매일 · 트랙 수)입니다. 0번 출처(facts)에도 같은 값이 있습니다.
+  0번 출처만으로는 쓰지 않습니다 — 다른 출처에 이 앨범 이야기가 있을 때 그 사실을 중심으로 쓰고, 날짜 · 트랙 수는 0번에서 보탭니다.""" + DESCRIBE_RULES
 
 CONCERT_SYSTEM = """KOPIS 공연 상세(JSON)와 그 공연의 포스터 · 소개 이미지를 indig 공연 후보로 정리합니다. indig 는 한국 인디 음악(밴드 · 싱어송라이터 · 인디 레이블) 플랫폼이고, 결과는 관리자가 확인한 뒤 등록됩니다.
 입력: detail(KOPIS 상세) · venue(공연시설 API 의 주소 · 좌석) · knownArtists(우리가 아는 아티스트 이름 중 이 공연 글에 보이는 것) · 이미지(포스터 다음에 소개 이미지, 긴 이미지는 위에서부터 잘라 순서대로).
@@ -256,6 +280,13 @@ class Llm:
             korean = None
         relevance = "MAINSTREAM" if str(result.get("relevance", "")).upper() == "MAINSTREAM" else "INDIE"
         return {"relevance": relevance, "genres": genres[:3], "korean_name": korean}
+
+    def describe(self, system: str, subject: dict, sources: list[dict]) -> list[dict]:
+        """11/25 소개 글 — [{text, source}] 그대로 (검사는 describe.checked). subject: {artist: …} 또는 {album: …} ·
+        sources: [{no, site, title, text}]"""
+        content = json.dumps({**subject, "sources": sources}, ensure_ascii=False)
+        result = self.extract(system, content, DESCRIBE_SCHEMA)
+        return [s for s in result.get("sentences") or [] if isinstance(s, dict)]
 
     def pick_artist(self, name: str, candidates: list[dict], concert: dict) -> str | None:
         """11/24 같은 이름의 한국 아티스트 여럿 중 이 공연에 나오는 사람 — 확실할 때만 id (아니면 None)"""

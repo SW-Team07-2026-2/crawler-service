@@ -145,6 +145,22 @@ class Found(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime)
 
 
+class Description(Base):
+    """11/25 소개 글 — 아티스트 bio · 앨범 description (한글). 한 번 만들면 다시 만들지 않습니다 (version 이 바뀔 때만).
+    text 가 null = 출처를 찾았지만 못 만들었거나 출처가 없음 → 후보에 null 로 가서 관리자가 씀 · checked_at 30일 뒤 한 번 더 찾음.
+    evidence_json = 출처 [{for, site, url, title, quote}] — 관리자 확인용으로 후보에 함께 갑니다."""
+    __tablename__ = "description"
+    __table_args__ = (UniqueConstraint("kind", "key"),)
+    id: Mapped[int] = mapped_column(Id, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(16))                 # ARTIST · ALBUM
+    key: Mapped[str] = mapped_column(String(64))                  # 후보 external_id
+    text: Mapped[str | None] = mapped_column(Text)
+    evidence_json: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(String(32))        # text 가 null 인 까닭 — no_source · too_thin
+    version: Mapped[int] = mapped_column(Integer)
+    checked_at: Mapped[datetime] = mapped_column(DateTime)
+
+
 def connect(url: str) -> sessionmaker[Session]:
     engine = create_engine(url, pool_pre_ping=True, future=True)
     Base.metadata.create_all(engine)

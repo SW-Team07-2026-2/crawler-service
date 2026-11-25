@@ -19,7 +19,7 @@ PLACES = {
     "reviewed_fetch": "Studio 처리 목록", "concert_fetch": "KOPIS 공연 상세", "concert_facility": "KOPIS 공연장",
     "concert_image": "공연 포스터 · 소개 이미지", "concert_cast": "출연진 → 팀 (MusicBrainz)", "concert_ticket": "예매 오픈 검색",
     "indistreet": "인디스트릿", "artist": "아티스트 찾기 (MusicBrainz)", "artist_refresh": "아티스트 다시 보기 (MusicBrainz)",
-    "artist_reask": "판단 못 한 아티스트 다시 묻기",
+    "artist_reask": "판단 못 한 아티스트 다시 묻기", "describe": "소개 글 (위키백과 · 웹 검색 · Gemini)",
     "discogs": "Discogs 피지컬", "gimbab": "김밥레코즈", "web_search": "웹 조사 (신보 · 굿즈)", "artist_name_search": "한글 이름 검색",
 }
 SAMPLES = 3   # 오류 종류마다 예시 수

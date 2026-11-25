@@ -20,7 +20,7 @@ KST = ZoneInfo("Asia/Seoul")
 
 
 def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
-    """kind: dawn(전체) · lunch(공연만). 이미 돌고 있으면 건너뜀."""
+    """kind: dawn(전체) · lunch(공연 · 다시 하기 · 소개 글). 이미 돌고 있으면 건너뜀."""
     with sessions() as s:
         busy = s.scalar(select(dbm.CrawlRun).where(dbm.CrawlRun.status == "RUNNING",
                                                    dbm.CrawlRun.started_at > dbm.now() - STALE))
@@ -61,6 +61,7 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
             if stage("공연 다시", pipeline.concerts) is None:
                 errors.insert(0, first)
     stage("다시 하기", lambda: pipeline.retry(names=kind == "dawn"))   # 못 끝낸 이름 · 공연을 한 번 더 — 남으면 다음 실행 맨 앞에
+    stage("소개 글", pipeline.describe)                               # 11/25 아티스트 · 앨범 소개 글 — 저녁 · 점심 모두 (실행마다 정해진 수만큼)
     stage("전송", pipeline.send)
     status = "FAILED" if errors else "DONE"
     error = " | ".join(errors)[:2000] or None
