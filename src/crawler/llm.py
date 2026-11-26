@@ -88,6 +88,23 @@ CONCERT_SCHEMA = _obj({
     "notices": {"type": "array", "items": {"type": "string"}},
 })
 
+# 11/26 굿즈 · 음반 판본 상세 설명 (detail.py) — 공식 판매 페이지의 글 · 이미지에서 사실만
+PRODUCT_SCHEMA = _obj({
+    "isProductPage": {"type": "boolean", "description": "이 상품을 파는 · 소개하는 페이지인지"},
+    "summary": {"type": "string"},
+    "facts": {"type": "array", "items": {"type": "string"}},
+    "care": {"type": "array", "items": {"type": "string"}},
+    "detailImages": {"type": "array", "items": {"type": "integer"}, "description": "상세 설명 이미지 번호 (1부터)"},
+})
+PRODUCT_SYSTEM = """아티스트 공식 굿즈 또는 음반 판본 하나의 판매 · 소개 페이지(글과 이미지)를 indig 상품 상세 설명으로 정리합니다. 결과는 관리자가 확인한 뒤 올라갑니다.
+입력: product(이름 · 종류 · 아티스트) · page(페이지 글) · 이미지(페이지의 큰 이미지 · "이미지 N" 글 다음에 그 이미지 · 긴 이미지는 위에서부터 잘라 이어짐).
+- isProductPage: 이 페이지가 바로 이 상품(이름 · 색 · 판이 맞는 것)을 파는 · 소개하는 페이지면 true. 목록 · 홈 · 다른 상품 페이지면 false 이고 나머지는 비웁니다.
+- summary: 상품을 소개하는 1~2문장. 페이지 · 이미지에 적힌 사실만 직접 씁니다. 홍보 문구 · 꾸밈말 · 가격 · 배송 · 할인 · 적립 이야기는 넣지 않습니다.
+- facts: 소재 · 실측 사이즈 · 구성품 · 색 · 인쇄 방식 · 판 정보(한정 수량 · 넘버링 · 컬러반 · 수록곡 수) · 제조국처럼 확인되는 사실을 한 줄씩 최대 12. "소재: 면 100%" 처럼 항목 이름을 앞에.
+- care: 세탁 · 보관 · 취급 주의를 한 줄씩 최대 5. 없으면 [].
+- detailImages: 상세 설명에 쓸 이미지 번호 (상품 사진 · 실측표 · 구성 안내). 로고 · 배너 · 다른 상품 · 아이콘 · 모델 얼굴만 나온 사진은 넣지 않습니다.
+- 페이지 · 이미지에 없는 값을 지어내지 않습니다. 읽히지 않는 글자는 추측하지 않습니다. 개인 정보는 쓰지 않습니다."""
+
 # 11/24 indig 가 다루는 아티스트 — 공연 · 아티스트 판단이 같이 씀 (사람이 읽는 판(서비스 설명)과 이유는 docs/v2_인디_아티스트_기준.md)
 INDIE_RULES = """indig 가 다루는 아티스트:
 - 다룸: 스스로 또는 인디 레이블 · 작은 기획사에서 음악을 만들고 클럽 · 라이브홀 · 소극장 · 인디 페스티벌 무대에 서는 밴드 · 싱어송라이터 · 프로듀서 · 연주자.
@@ -325,6 +342,16 @@ class Llm:
             return self.extract(CONCERT_SYSTEM, text, CONCERT_SCHEMA)
         parts = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in images]
         return self.extract(CONCERT_SYSTEM, [*parts, types.Part.from_text(text=text)], CONCERT_SCHEMA)
+
+
+    def product_detail(self, product: dict, page: str, images: list[list[bytes]]) -> dict:
+        """11/26 product: {name, kind, artist} · page: 페이지 글 · images: 이미지마다 JPEG 조각 (images.slices) — 번호는 1부터"""
+        parts = []
+        for n, chunks in enumerate(images, start=1):
+            parts.append(types.Part.from_text(text=f"이미지 {n}"))
+            parts += [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in chunks]
+        text = json.dumps({"product": product, "page": page}, ensure_ascii=False)
+        return self.extract(PRODUCT_SYSTEM, [*parts, types.Part.from_text(text=text)] if parts else text, PRODUCT_SCHEMA)
 
 
 def _call(run: dict, call) -> dict:

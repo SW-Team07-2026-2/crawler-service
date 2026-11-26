@@ -59,7 +59,7 @@ def make_http(sessions, web) -> Http:
 
 
 class FakeLlm:
-    def __init__(self, concerts=None, genres=None, names=None, mainstream=(), picks=None, describes=None):
+    def __init__(self, concerts=None, genres=None, names=None, mainstream=(), picks=None, describes=None, products=None):
         self.concerts = concerts or {}      # mt20id → 결과
         self.genres = genres or {}          # 이름 → 장르
         self.names = names or {}            # 이름 → 한글 활동명
@@ -72,6 +72,8 @@ class FakeLlm:
         self.images: dict[str, int] = {}    # mt20id → 이미지 조각 수
         self.describes = describes or {}    # 아티스트 이름 · 앨범 제목 → 소개 글 문장 [{text, source}]
         self.described: list[tuple[str, list]] = []   # (이름 · 제목, 넘긴 출처)
+        self.products = products or {}      # 11/26 상품 이름 → 상세 정리 결과
+        self.product_images: dict[str, int] = {}   # 상품 이름 → 넘긴 이미지 수
         self.input_tokens = self.output_tokens = 0
 
     def concert(self, facts, images=None):
@@ -79,6 +81,11 @@ class FakeLlm:
         self.calls.append(f"concert:{mt20id}")
         self.facts[mt20id], self.images[mt20id] = facts, len(images or [])
         return copy.deepcopy(self.concerts[mt20id])     # 실제 Gemini 처럼 부를 때마다 새 결과 (파이프라인이 고쳐 써도 다음 호출에 안 남게)
+
+    def product_detail(self, product, page, images):
+        self.calls.append(f"product:{product['name']}")
+        self.product_images[product["name"]] = len(images)
+        return copy.deepcopy(self.products.get(product["name"], {"isProductPage": False}))
 
     def pick_artist(self, name, candidates, concert):
         self.calls.append(f"pick:{name}")

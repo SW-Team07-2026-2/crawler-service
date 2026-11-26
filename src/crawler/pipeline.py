@@ -27,6 +27,7 @@ from sqlalchemy import delete, or_, select
 
 from . import db as dbm
 from . import describe as desc
+from . import detail as dt
 from . import images as imgs
 from . import llm as llms
 from . import notify
@@ -73,6 +74,14 @@ DESCRIBE_ALBUMS = 40                   # 같은 것 · 앨범 (출처가 없는 
 DESCRIBE_SEARCHES = 15                 # 한 번 실행에 소개 글 출처 찾기(위키백과 문서가 없을 때)에 쓸 검색 크레딧
 DESCRIBE_AGAIN = timedelta(days=30)    # 출처가 없거나 못 쓴 것은 이만큼 지나 한 번 더
 DESCRIBE_LIVE = ("READY", "SENT", "HOLD", "FAILED")   # 소개 글을 쓰는 후보 상태 (뺀 SKIPPED 는 쓰지 않음)
+# 11/26 굿즈 · 웹 검색 판본 상세 설명 · 상세 이미지 (product_details · detail.py) — Discogs 판본은 discogs.description · 김밥레코즈는 안 함
+DETAIL_VERSION = 1                     # 읽는 방식이 바뀌면 올림 → 다시 읽음 (관리자가 쓴 글은 Catalog 가 지킴)
+DETAIL_PRODUCTS = 20                   # 한 번 실행에 공식 판매 페이지를 열어 Gemini 로 정리할 상품 수
+DETAIL_AGAIN = timedelta(days=30)      # 못 읽었거나 쓸 것이 없던 상품은 이만큼 지나 한 번 더
+DETAIL_CANDIDATES = 12                 # 페이지에서 받아 볼 이미지 수 (나온 순서)
+DETAIL_MIN_SIDE = 500                  # 이보다 작은 이미지(아이콘 · 썸네일)는 빼기 (긴 변 기준)
+DETAIL_SLICES = 24                     # Gemini 에 보낼 이미지 조각 상한 (상품 하나)
+DETAIL_IMAGES = 10                     # 후보에 넣을 상세 이미지 상한
 
 
 class Pipeline:
@@ -904,6 +913,108 @@ class Pipeline:
             out["evidence"] = evidence
         return out
 
+    # ---------- 굿즈 · 판본 상세 설명 (11/26) ----------
+
+    def product_details(self):
+        """굿즈 · 웹 검색으로 찾은 판본의 공식 판매 페이지(detail.SKIP_HOSTS 밖)를 열어 Gemini 가 글 · 이미지에서 사실만 정리 → 상세 설명 ·
+        상세 이미지 주소 (Studio 가 승인할 때 우리 버킷으로 옮김). 김밥레코즈 판본은 하지 않음 (약관 제22조 · 10.6 · 판 사실만 씀) ·
+        Discogs 판본은 discogs.description 이 만듦. 한 번 읽으면 다시 읽지 않음 (못 썼으면 DETAIL_AGAIN 뒤 · DETAIL_VERSION 이 바뀌면 다시)."""
+        pages = getattr(self.searcher, "pages", None)
+        if self.llm is None or pages is None:
+            return
+        left = DETAIL_PRODUCTS
+        artists, listed = {}, set()        # 후보에 실제로 들어간 상품만 (같은 형식은 한 곳 것만 붙어 웹 검색 판본이 빠지기도 함)
+        with self.sessions() as s:
+            for i in s.scalars(select(dbm.Item).where(dbm.Item.type.in_(("ARTIST", "ALBUM")), dbm.Item.status.in_(DESCRIBE_LIVE))):
+                payload = json.loads(i.payload_json)
+                if i.type == "ARTIST":
+                    artists[i.key] = payload.get("name")
+                listed |= {x.get("external_id") for x in (payload.get("goods") or []) + (payload.get("physical_albums") or [])}
+            rows = [(f.id, f.artist_key, f.kind, json.loads(f.data_json), json.loads(f.evidence_json)) for f in s.scalars(
+                select(dbm.Found).where(dbm.Found.kind.in_(("GOODS", "PHYSICAL")), dbm.Found.site == "websearch").order_by(dbm.Found.id))]
+        for fid, artist_key, kind, data, evidence in rows:
+            if artist_key not in artists or data.get("external_id") not in listed or not _detail_due(data):
+                continue
+            url = dt.page_for(data, evidence)
+            if url is None:
+                self.stats["product_detail_no_page"] += 1           # 판매처 · SNS 출처뿐 — 관리자가 씀
+                continue
+            if left <= 0 or not self._llm_usable():
+                self.stats["product_detail_deferred"] += 1
+                continue
+            left -= 1
+            try:
+                text, images, reason = self._product_detail(pages, kind, data, artists[artist_key], url)
+            except LlmSkip as e:
+                self.stats[f"product_detail_llm_{e}"] += 1
+                continue
+            except Exception as e:                                    # 막힌 주소 · 페이지 오류 — 30일 뒤 한 번 더
+                self._fail("product_detail", data["external_id"], e)
+                text, images, reason = None, [], "failed"
+            self.stats[f"product_detail_{'written' if text else reason}"] += 1
+            self._save_product_detail(fid, kind, artist_key, data["external_id"], url, text, images, reason)
+
+    def _product_detail(self, pages, kind: str, data: dict, artist: str | None, url: str):
+        """→ (상세 설명 또는 None, 상세 이미지 주소, None 인 까닭)"""
+        final, md = pages.read(url)                                   # robots · 공개 주소 확인 포함
+        if dt.skipped(final):
+            return None, [], "skip_host"                              # 판매처 · SNS 로 넘어감
+        images: list[tuple[str, list[bytes]]] = []
+        for src in dt.image_urls(md, final)[:DETAIL_CANDIDATES]:
+            if sum(len(c) for _, c in images) >= DETAIL_SLICES:
+                break
+            try:
+                pages.check_public(src)
+                raw = self.http.get_bytes("detail", src, max_bytes=10 * 1024 * 1024)
+                if max(imgs.size(raw)) < DETAIL_MIN_SIDE:
+                    continue
+                images.append((src, imgs.slices(raw, limit=DETAIL_SLICES - sum(len(c) for _, c in images))))
+            except Exception:
+                self.stats["product_detail_image_skipped"] += 1        # 막힘 · 이미지 아님 · 너무 큼 — 그 이미지만 뺌
+        product = {"name": data.get("name"), "kind": "굿즈" if kind == "GOODS" else f"음반 판본 ({data.get('format')})",
+                   "artist": artist, "album": data.get("album_title")}
+        r = self.llm.product_detail(product, dt.page_text(md), [c for _, c in images])
+        if not r.get("isProductPage"):
+            return None, [], "not_product_page"
+        text = dt.markdown(r, final)
+        keep = list(dict.fromkeys(images[n - 1][0] for n in r.get("detailImages") or []
+                                  if isinstance(n, int) and 1 <= n <= len(images)))[:DETAIL_IMAGES]
+        return text, (keep if text else []), None if text else "too_thin"
+
+    def _save_product_detail(self, fid: int, kind: str, artist_key: str, external_id: str, url: str,
+                             text: str | None, images: list[str], reason: str | None):
+        """찾은 상품(found)에 저장하고 후보(아티스트 goods · 앨범 physical_albums)에도 바로 넣음 — 바뀌었으면 READY (HOLD 는 그대로)"""
+        with self.sessions() as s:
+            f = s.get(dbm.Found, fid)
+            data = json.loads(f.data_json)
+            data.update({"description": text, "detail_image_urls": images or None, "detail_source": url, "detail_reason": reason,
+                         "detail_version": DETAIL_VERSION, "detail_checked_at": dbm.now().isoformat()})
+            f.data_json = json.dumps(data, ensure_ascii=False)
+            prefix, field, type_ = ("goods", "goods", "ARTIST") if kind == "GOODS" else ("physical", "physical_albums", "ALBUM")
+            owners = [self._item(s, "ARTIST", artist_key)] if kind == "GOODS" else s.scalars(
+                select(dbm.Item).where(dbm.Item.type == "ALBUM")).all()
+            for item in owners:
+                if item is None:
+                    continue
+                payload = json.loads(item.payload_json)
+                entries = [e for e in payload.get(field) or [] if e.get("external_id") == external_id]
+                if not entries or (type_ == "ALBUM" and payload.get("artist_ref", {}).get("external_id") != artist_key):
+                    continue
+                for e in entries:
+                    for k in ("description", "detail_image_urls"):
+                        e.pop(k, None)
+                    e.update(_detail_fields(data))
+                tag = f"{prefix}:{external_id}"
+                ev = [e for e in payload.get("evidence") or [] if not (e.get("for") == tag and e.get("site") == "detail")]
+                at = max((i + 1 for i, e in enumerate(ev) if e.get("for") == tag), default=len(ev))
+                ev[at:at] = _detail_evidence(prefix, data)
+                payload["evidence"] = ev
+                if not ev:
+                    payload.pop("evidence")
+                self._upsert(s, type_, item.key, payload, item.input_hash, origin=item.origin,
+                             status="HOLD" if item.status == "HOLD" else "READY", note=item.error if item.status == "HOLD" else None)
+            s.commit()
+
     # ---------- 전송 ----------
 
     def send(self):
@@ -1069,6 +1180,14 @@ class Pipeline:
         log.warning("crawl_%s_failed item=%s error=%s", what, key, str(e)[:300])   # key= 는 로그 가림 필터가 비밀로 봄 (11/19)
 
 
+def _detail_due(data: dict) -> bool:
+    """상세를 (다시) 읽을 차례 — 처음 · 방식이 바뀜 · 못 쓴 지 DETAIL_AGAIN"""
+    checked = data.get("detail_checked_at")
+    if checked is None or data.get("detail_version") != DETAIL_VERSION:
+        return True
+    return not data.get("description") and datetime.fromisoformat(checked) < dbm.now() - DETAIL_AGAIN
+
+
 def _due(row) -> bool:
     """소개 글을 (다시) 만들 차례 — 처음 · 만드는 방식이 바뀜 · 출처가 없었거나 못 쓴 지 30일"""
     return (row is None or row.version != DESCRIBE_VERSION
@@ -1150,11 +1269,23 @@ def _physicals(from_discogs: list | None, found: list[dict]) -> tuple[list | Non
                 "예약 판매" if d.get("pre_order") else None,
                 f"참고 가격 {d['reference_price']:,}원 (출처 페이지 가격 · 판매가는 관리자가 정함)" if d.get("reference_price") else None,
                 "LP 색 모름 — 검정으로 둠" if lp and d.get("vinyl_color") not in ("COLOR", "BLACK") else None) if n]
+            out[-1].update(_detail_fields(d))
             evidence += [{"for": f"physical:{d['external_id']}", **e, **({"note": " · ".join(notes)} if notes and i == 0 else {})}
-                         for i, e in enumerate(f["evidence"])]
+                         for i, e in enumerate(f["evidence"])] + _detail_evidence("physical", d)
             added.add(d["format"])
         taken |= added
     return (out or None), evidence
+
+
+def _detail_fields(d: dict) -> dict:
+    """11/26 찾은 상품에 저장한 상세 설명 · 상세 이미지 — 없으면 칸을 넣지 않음 (null = Catalog 가 저장된 값을 그대로 둠)"""
+    return {k: d[k] for k in ("description", "detail_image_urls") if d.get(k)}
+
+
+def _detail_evidence(prefix: str, d: dict) -> list[dict]:
+    return ([{"for": f"{prefix}:{d['external_id']}", "site": "detail", "url": d["detail_source"],
+              "title": "상세 설명 · 상세 이미지를 읽은 페이지", "quote": None}]
+            if d.get("description") and d.get("detail_source") else [])
 
 
 def _goods(found: list[dict]) -> tuple[list | None, list[dict]]:
@@ -1166,9 +1297,10 @@ def _goods(found: list[dict]) -> tuple[list | None, list[dict]]:
                       "thumbnail_url": None, "purchase_url": d.get("purchase_url"),
                       "options": [{"name": size, "vinyl_color": None, "size": size, "price": None, "qty": None}
                                   for size in d.get("sizes") or ["FREE"]]})
+        goods[-1].update(_detail_fields(d))
         note = f"참고 가격 {d['reference_price']:,}원 (출처 페이지 가격 · 판매가는 관리자가 정함)" if d.get("reference_price") else None
         evidence += [{"for": f"goods:{d['external_id']}", **e, **({"note": note} if note and i == 0 else {})}
-                     for i, e in enumerate(f["evidence"])]
+                     for i, e in enumerate(f["evidence"])] + _detail_evidence("goods", d)
     return (goods or None), evidence
 
 
