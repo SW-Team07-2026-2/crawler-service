@@ -52,7 +52,8 @@ SKIP_WHY = {"MAINSTREAM": "대중 가수 · 공연", "HIPHOP": "힙합", "NOT_CO
 LLM_WAIT_BUDGET = 3 * 3600   # 11/26 실행마다 Gemini 쉬는 시간(503 COOLDOWN 20분)을 기다려 주는 최대 시간 — 점심(12:30) 실행이 저녁(20:00) 전에 끝나게
 MISS_WHY = {"not_found": "한국 아티스트로 못 찾음 (외국 팀 · 표기 차이 · 동명이인)", "no_releases": "MusicBrainz 에 앨범이 없음"}
 _SKIP_FOR_LLM = {"poster", "styurls"}  # 이미지는 주소 대신 이미지로 넣음
-CONCERT_VERSION = 2                    # 공연 정리 방식(프롬프트 · 입력)이 바뀌면 올림 → 같은 원문도 다시 정리
+CONCERT_VERSION = 3                    # 공연 정리 방식(프롬프트 · 입력)이 바뀌면 올림 → 같은 원문도 다시 정리 (11/26 3: 소개 이미지의 출연진 소개 · 곡목 · 타임테이블 · 부대 행사)
+CONCERT_REREAD = 60                    # 11/26 방식만 바뀐(원문은 같은) 공연을 한 번 실행에 다시 정리할 수 — 나머지는 다음 실행에 (Gemini 몫을 아티스트 판단에도 남기려고)
 KOPIS_HOSTS = {"www.kopis.or.kr", "kopis.or.kr"}   # Studio 가 승인할 때 옮겨 오는 곳 (app.image.import-hosts 와 같음)
 MAX_IMAGE_URLS = 20                    # Concert imageUrls 상한
 KOPIS_DOWN = 5                         # 공연 상세가 (다시 불러도) 이만큼 연달아 실패하면 KOPIS 가 내려간 것으로 보고 남은 공연은 다음 실행에
@@ -87,6 +88,7 @@ class Pipeline:
         self._indistreet: list[dict] = []
         self._contexts: dict[str, dict] = {}   # 11/24 출연진 이름 → 나온 공연 (같은 이름 아티스트가 여럿일 때 고르는 근거)
         self._web_left = WEB_ARTISTS_PER_RUN
+        self._reread_left = CONCERT_REREAD
         self._llm_wait_left = LLM_WAIT_BUDGET   # 11/26 이번 실행에 Gemini 쉬는 시간을 더 기다려 줄 수 있는 초
         self._lineup_names: tuple | None = None   # 11/26 보낼 때 공연 라인업 → 아티스트 후보 (send 마다 새로)
         self.failures: dict[str, dict] = {}   # 11/24 알림용 — what → {count, codes: {코드: 수}, samples: [(항목, 내용)] 몇 개}
@@ -162,6 +164,16 @@ class Pipeline:
                 input_hash = content_hash({"v": CONCERT_VERSION, "detail": detail, "venue": venue})
                 # 원문이 같으면 다시 정리하지 않음 — 정리(Gemini) · 출연진→팀 조회가 실패해 남은 공연은 원문이 같아도 다시
                 same = item is not None and item.input_hash == input_hash and retry.get(mt20id) not in ("llm", "cast")
+                if not same and item is not None and mt20id not in retry and item.input_hash in {
+                        content_hash({"v": v, "detail": detail, "venue": venue}) for v in range(1, CONCERT_VERSION)}:
+                    # 11/26 원문은 그대로고 정리 방식만 바뀜 — 뺀 공연은 다시 보지 않고, 나머지는 실행마다 CONCERT_REREAD 건까지
+                    if item.status == "SKIPPED" or self._reread_left <= 0:
+                        same = True
+                        if item.status != "SKIPPED":
+                            self.stats["concert_reread_deferred"] += 1
+                    else:
+                        self._reread_left -= 1
+                        self.stats["concert_reread"] += 1
                 if same:
                     self.stats["concert_same_input"] += 1
                     if item.status != "SKIPPED":
@@ -1283,6 +1295,28 @@ def _mentioned(known: list[tuple[str, str]], detail: dict) -> list[str]:
     return list(dict.fromkeys(name for n, name in known if n in text))[:30]
 
 
+def _lines(values, limit: int) -> list[str]:
+    """Gemini 가 준 줄 목록 — 빈 줄 · 같은 줄을 빼고 한 줄로 (마크다운 목록이 깨지지 않게)"""
+    out = [" ".join(str(v).split()) for v in values or [] if isinstance(v, str)]
+    return [v for v in dict.fromkeys(out) if v][:limit]
+
+
+def _performer(p: dict) -> str | None:
+    """출연진 소개 한 줄 — 개인 정보 문장(생년 · 학교 · 가족 등 · describe.PRIVATE)은 뺌 · 소개가 남지 않으면 넣지 않음"""
+    name = " ".join(str(p.get("name") or "").split())
+    sentences = re.split(r"(?<=[.!?。])\s+|(?<=다\.)\s*", " ".join(str(p.get("intro") or "").split()))
+    intro = " ".join(s for s in sentences if s and not desc.PRIVATE.search(s)).strip()
+    return f"**{name}** — {intro}" if name and intro else None
+
+
+_AGE_WORDS = re.compile(r"관람\s*연령|관람\s*가능|관람가|관람|연령|이상|이하|전체|만|세|가능|본|공연|입장|입니다|합니다|됩니다|은|는|이|가|[\d\s:·.,()\-~!]")
+
+
+def _only_age(note: str) -> bool:
+    """관람 연령만 다시 적은 줄 ('만 7세 이상 관람 가능' · '전체 관람가') — 관람 연령 줄이 따로 있어 뺌. 확인 방법 등 다른 말이 있으면 남김"""
+    return not _AGE_WORDS.sub("", note).strip()
+
+
 def _description(detail: dict, c: dict, venue: dict, concert: dict) -> str | None:
     """상세 설명 (마크다운) — 소개 · 관람 공지는 Gemini 가 이미지 · 글에서 정리, 일정 · 연령 · 공연장 · 출연 · 주최는 KOPIS 원문 값 그대로.
     가격 · 예매 오픈은 따로 넣는 값이고, 예매처마다 다른 안내(수령 · 환불 · 고객센터)는 indig 가 직접 팔므로 넣지 않습니다."""
@@ -1301,8 +1335,14 @@ def _description(detail: dict, c: dict, venue: dict, concert: dict) -> str | Non
     summary = (_opt(c.get("summary")) or "").strip()
     if summary:
         lines += [summary, ""]
+    lines += section("출연진 소개", [_performer(p) for p in (c.get("performers") or [])[:12] if isinstance(p, dict)])
+    lines += section("프로그램", _lines(c.get("program"), 40))
+    lines += section("타임테이블", _lines(c.get("timetable"), 80))
     lines += section("일정", [period, detail.get("dtguidance"), f"공연 시간 {detail['prfruntime']}" if detail.get("prfruntime") else None])
-    lines += section("관람 안내", [f"관람 연령: {detail['prfage']}" if detail.get("prfage") else None, *(c.get("notices") or [])[:8]])
+    age = (detail.get("prfage") or "").strip()
+    lines += section("관람 안내", [f"관람 연령: {age}" if age else None,
+                                   *[n for n in _lines(c.get("notices"), 8) if not (age and _only_age(n))]])
+    lines += section("부대 행사", _lines(c.get("events"), 6))
     lines += section("공연장", [place, venue.get("address"), f"{venue['seats']:,}석" if venue.get("seats") else None])
     lines += section("출연", [" · ".join(concert["artistNames"])])
     lines += section("주최 · 기획", [f"{' · '.join(roles)}: {name}" for name, roles in org.items()])
