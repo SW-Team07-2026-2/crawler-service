@@ -141,8 +141,11 @@ def test_english_name_goes_as_the_korean_name_and_artists_judged_before_are_aske
     set_old_input()
     studio = FakeStudio()
     runner.run("dawn", sessions, pipeline(sessions, w, studio, NoQuota({"PF100": INDIE, "PF200": MAINSTREAM})), ["검정치마"])
-    assert studio.posts == []                                        # 영어 이름으로 되돌아가지 않음
+    # 영어 이름으로 되돌아가지 않음 · 11/26 판단 전 표시만 붙어 다시 감 (관리자 화면이 구별하게)
+    assert [(path, sorted(i["name"] for i in body["items"])) for path, body in studio.posts] == [(ARTISTS, ["검정치마", "실리카겔"])]
+    assert all([e["note"][:4] for e in i["evidence"] if e["for"] == "check"] == ["판단 전"] for i in studio.posts[0][1]["items"])
     assert {json.loads(i.payload_json)["name"] for i in items(sessions, "ARTIST").values()} == {"검정치마", "실리카겔"}
+    assert {i.status for i in items(sessions, "ARTIST").values()} == {"SENT"}
 
 
 def test_english_name_without_a_hangul_alias_is_looked_up_once_in_web_search(sessions):
@@ -195,7 +198,7 @@ def test_mainstream_and_hiphop_artists_are_skipped_without_albums_web_search_or_
 
 def test_artist_sent_before_and_now_judged_mainstream_is_skipped_once_and_stays_skipped(sessions):
     """이미 보낸 팀을 다시 물어(ARTIST_ASK) 대중 쪽이면 내용이 같아도 SKIPPED · 그 팀 공연도 (Studio 대기열은 관리자가 거절).
-    한 번 정하면 다시 묻지 않고 SKIPPED 그대로"""
+    11/26 Studio 에는 '크롤러가 뺌' 표시만 한 번 보냄 (상태는 SKIPPED 그대로). 한 번 정하면 다시 묻지 않고 SKIPPED 그대로"""
     w = web()
     runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio()), ["검정치마"])
     with sessions() as s:
@@ -205,14 +208,23 @@ def test_artist_sent_before_and_now_judged_mainstream_is_skipped_once_and_stays_
     studio = FakeStudio()
     out = runner.run("dawn", sessions, pipeline(sessions, w, studio, FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres,
                                                                           mainstream={"Silica Gel"})), ["검정치마"])
-    assert studio.posts == []
+    assert [(path, [i["external_id"] for i in body["items"]]) for path, body in studio.posts] == [
+        (ARTISTS, [items(sessions, "ARTIST")[k].key for k in items(sessions, "ARTIST") if items(sessions, "ARTIST")[k].status == "SKIPPED"]),
+        (CONCERTS, ["PF100"])]
+    artist = studio.posts[0][1]["items"][0]
+    assert [e["note"] for e in artist["evidence"] if e["for"] == "check"] == ["크롤러가 뺌 (대중 가수 · 공연) — 승인하지 말고 거절"]
+    assert [e["for"] for e in artist["evidence"]][0] == "identity"
+    assert studio.posts[1][1]["items"][0]["concert"]["reviewNotes"][-1] == \
+        "[크롤러] 크롤러가 뺌 (대중 가수 · 공연 · 라인업 대부분이 뺀 팀) — 승인하지 말고 거절"
     artists = {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()}
     assert artists == {"검정치마": "SENT", "Silica Gel": "SKIPPED"}
     assert items(sessions, "CONCERT")["PF100"].status == "SKIPPED" and out["stats"]["concert_skipped_after_sent"] == 1
 
     llm = FakeLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres)          # 이번엔 INDIE 라고 해도 다시 묻지 않음
-    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio(), llm), ["검정치마"])
+    studio = FakeStudio()
+    runner.run("dawn", sessions, pipeline(sessions, w, studio, llm), ["검정치마"])
     assert "artist:Silica Gel" not in llm.calls
+    assert studio.posts == []                                         # 표시는 한 번만
     assert {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()}["Silica Gel"] == "SKIPPED"
 
 
@@ -1187,3 +1199,98 @@ def test_artists_in_the_include_list_are_kept_even_if_judged_mainstream(sessions
     status = {json.loads(i.payload_json)["name"]: i.status for i in items(sessions, "ARTIST").values()}
     assert status == {"검정치마": "SKIPPED", "Silica Gel": "SENT"}
     assert out["stats"]["artist_included"] == 1 and items(sessions, "CONCERT")["PF100"].status == "SENT"
+
+
+def test_marks_go_once_for_held_artists_and_never_for_candidates_studio_rejected(sessions):
+    """11/26 보낸 뒤 보류(HOLD)가 된 팀은 '보류 중' 표시를 한 번 보냄 · Studio 가 거절한 후보(REVIEWED)는 표시가 바뀌어도 보내지 않음.
+    처음 보낼 때부터 MusicBrainz 주소(identity)가 붙음 — 동명이인 확인용"""
+    w = web()
+    studio = FakeStudio()
+    runner.run("dawn", sessions, pipeline(sessions, w, studio), ["검정치마"])
+    first = {i["name"]: i for path, body in studio.posts if path == ARTISTS for i in body["items"]}
+    assert first["검정치마"]["evidence"][0] == {"for": "identity", "site": "MusicBrainz",
+                                              "url": "https://musicbrainz.org/artist/bs", "title": "검정치마"}
+    albums = [i for path, body in studio.posts if path == ALBUMS for i in body["items"]]
+    assert all(a["evidence"][0]["for"] == "identity" and "release-group/" in a["evidence"][0]["url"] for a in albums)
+
+    keys = {json.loads(i.payload_json)["name"]: k for k, i in items(sessions, "ARTIST").items()}
+    held, rejected = keys["Silica Gel"], keys["검정치마"]   # 검정치마는 공연이 없어 뺀 팀의 공연(라인업)이 함께 바뀌지 않음
+    with sessions() as s:
+        s.execute(update(dbm.Item).where(dbm.Item.key == held).values(status="HOLD"))
+        s.execute(update(dbm.Item).where(dbm.Item.key == rejected).values(status="SKIPPED", error="HIPHOP", studio_result="REVIEWED"))
+        s.commit()
+    p = pipeline(sessions, w, studio := FakeStudio())
+    p.send()
+    assert [(path, [i["external_id"] for i in body["items"]]) for path, body in studio.posts] == [(ARTISTS, [held])]
+    assert [e["note"] for e in studio.posts[0][1]["items"][0]["evidence"] if e["for"] == "check"] == \
+        ["크롤러가 보류 중 (장르를 정하지 못함) — 판단이 끝나 다시 올 때까지 승인하지 말 것"]
+    assert items(sessions, "ARTIST")[held].status == "HOLD"          # 상태는 그대로
+    p.send()
+    assert len(studio.posts) == 1                                     # 한 번만
+
+
+def test_concert_lineup_goes_with_artist_ids_or_why_the_team_is_missing(sessions):
+    """11/26 공연 라인업 이름마다 아티스트 후보 id(크롤러 이름 연결 — 영어 · 한글이 달라도 같은 팀) 또는 수집하지 못한 이유.
+    관리자 화면이 이름 대신 id 로 맞추고, 수집 못 한 팀(라인업에 넣을 수 없음)을 구별하게"""
+    from crawler.keys import norm
+    w = web()
+    studio = FakeStudio()
+    runner.run("dawn", sessions, pipeline(sessions, w, studio), ["검정치마"])
+    with sessions() as s:
+        sg = s.scalar(select(dbm.ArtistLink.key).where(dbm.ArtistLink.site == "name", dbm.ArtistLink.site_id == norm("실리카겔")))
+        s.add(dbm.ArtistMiss(name_norm=norm("없는 밴드"), name="없는 밴드", reason="not_found", checked_at=dbm.now()))
+        s.commit()
+    concert = next(i for path, body in studio.posts if path == CONCERTS for i in body["items"])
+    assert sg and concert["concert"]["lineup"] == [{"name": "실리카겔", "externalId": sg}]
+
+    p = pipeline(sessions, w, studio := FakeStudio())
+    p.send()
+    assert studio.posts == []                                         # 라인업 연결이 그대로면 다시 가지 않음
+    assert p._lineup(["Silica Gel", "없는 밴드", "처음 듣는 팀"]) == [
+        {"name": "Silica Gel", "externalId": sg},
+        {"name": "없는 밴드", "missing": "한국 아티스트로 못 찾음 (외국 팀 · 표기 차이 · 동명이인)"},
+        {"name": "처음 듣는 팀", "missing": "아직 찾지 않음 (다음 실행에)"}]
+
+
+class CoolingLlm(FakeLlm):
+    """Gemini 가 쉬는 중(503 COOLDOWN)인 척 — wait 하면 풀림 · budget 을 넘는 시간이 남았으면 풀리지 않음"""
+    def __init__(self, *args, left=1200.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.left, self.waited = left, []
+
+    @property
+    def exhausted(self):
+        return self.left > 0
+
+    def cooldown_left(self):
+        return self.left
+
+    def wait(self, seconds):
+        self.waited.append(seconds)
+        self.left = 0.0
+
+
+def test_reask_waits_out_the_gemini_cooldown_within_the_run_budget(sessions):
+    """11/26 점심 실행이 쉬는 중이라 판단 15팀 · 소개 글 0 으로 끝남 → 실행 몫(3시간) 안이면 쉬는 시간을 기다렸다 이어서 물음.
+    남은 쉬는 시간이 몫보다 길면 기다리지 않고 다음 실행에"""
+    from crawler import pipeline as pl
+    w = web()
+    runner.run("dawn", sessions, pipeline(sessions, w, FakeStudio()), ["검정치마"])
+    with sessions() as s:
+        s.execute(update(dbm.Item).where(dbm.Item.type == "ARTIST").values(input_hash="not-judged"))
+        s.commit()
+    genres = {"검정치마": ["INDIE_ROCK"], "Silica Gel": ["PSYCHEDELIC", "INDIE_ROCK"]}
+
+    llm = CoolingLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres, left=1200.0)
+    p = pipeline(sessions, w, FakeStudio(), llm)
+    p._reask()
+    assert llm.waited == [1200.0] and p.stats["artist_reask"] == 2 and p.stats["llm_cooldown_waited_s"] == 1200
+    assert p._llm_wait_left == pl.LLM_WAIT_BUDGET - 1200 and "artist_not_judged_left" not in p.stats
+
+    with sessions() as s:
+        s.execute(update(dbm.Item).where(dbm.Item.type == "ARTIST").values(input_hash="not-judged"))
+        s.commit()
+    llm = CoolingLlm({"PF100": INDIE, "PF200": MAINSTREAM}, genres, left=pl.LLM_WAIT_BUDGET + 1)
+    p = pipeline(sessions, w, FakeStudio(), llm)
+    p._reask()
+    assert llm.waited == [] and p.stats["artist_reask_deferred"] == 2 and p.stats["artist_not_judged_left"] == 2
