@@ -856,6 +856,100 @@ def test_found_releases_physicals_and_goods_become_candidates_with_sources(sessi
     assert len(sent[ALBUMS]) == 4
 
 
+class FakePages:
+    """11/26 webtools.PageReader 대신 — 주소 → 마크다운 · 안쪽 주소는 Blocked"""
+    def __init__(self, pages):
+        self.pages, self.read_urls = pages, []
+
+    def read(self, url):
+        self.read_urls.append(url)
+        return url, self.pages[url]
+
+    def check_public(self, url):
+        from crawler.http import Blocked
+        if "internal" in url:
+            raise Blocked(url)
+
+
+def test_goods_detail_from_the_official_store_page_goes_with_the_artist(sessions):
+    """11/26 공식 판매 페이지의 글 · 큰 이미지 → Gemini 정리 → 굿즈 description · detail_image_urls + 출처 (작은 이미지 · 안쪽 주소는 빼고)"""
+    w, studio, web_search = found_web(), FakeStudio(), searcher()
+    w.add_bytes("cdn.example/detail-1.jpg", png(860, 2400))
+    w.add_bytes("cdn.example/icon.png", png(40, 40))
+    w.add_bytes("cdn.example/detail-2.jpg", png(860, 900))
+    web_search.pages = FakePages({LABEL_URL: "실리카겔 정규 2집 안내", STORE_URL: "\n".join([
+        "# 로고 티셔츠 블랙", "![](https://cdn.example/icon.png)", "면 100% · 실크 스크린 인쇄",
+        "![상세](https://cdn.example/detail-1.jpg)", "![](http://internal.example/x.jpg)", "![](https://cdn.example/detail-2.jpg)"])})
+    llm = FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM}, genres={"Silica Gel": ["PSYCHEDELIC"]},
+                  products={"로고 티셔츠 블랙": {"isProductPage": True, "summary": "실리카겔 로고를 앞면에 인쇄한 반팔 티셔츠.",
+                                               "facts": ["소재: 면 100%", "인쇄: 실크 스크린"], "care": [], "detailImages": [1, 9]}})
+    p = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), studio=studio, searcher=web_search, llm=llm)
+    out = runner.run("dawn", sessions, p, ["검정치마"])
+    assert out["status"] == "DONE" and out["stats"]["product_detail_written"] == 1
+    assert web_search.pages.read_urls == [LABEL_URL, STORE_URL]           # 웹 검색 CD 도 읽음 (김밥레코즈 LP 에 밀린 웹 LP 는 후보에 없어 안 읽음)
+    assert out["stats"]["product_detail_not_product_page"] == 1
+    assert llm.product_images["로고 티셔츠 블랙"] == 2                      # 아이콘 · 안쪽 주소는 빼고 큰 이미지 2개
+    [tee] = payloads(sessions, "ARTIST")["Silica Gel"]["goods"]
+    assert tee["description"] == "\n".join(["실리카겔 로고를 앞면에 인쇄한 반팔 티셔츠.", "", "## 상품 정보", "- 소재: 면 100%",
+                                            "- 인쇄: 실크 스크린", "", "정보 출처: store.example"])
+    assert tee["detail_image_urls"] == ["https://cdn.example/detail-1.jpg"]   # 없는 번호(9)는 버림
+    ev = payloads(sessions, "ARTIST")["Silica Gel"]["evidence"]
+    assert ev[-1] == {"for": f"goods:{tee['external_id']}", "site": "detail", "url": STORE_URL,
+                      "title": "상세 설명 · 상세 이미지를 읽은 페이지", "quote": None}
+    sent = [i for path, body in studio.posts if path.endswith("/artists") for i in body["items"] if i["name"] == "Silica Gel"]
+    assert sent[-1]["goods"][0]["description"] == tee["description"]      # 같은 실행에 보냄
+
+
+def test_product_details_are_read_once_and_never_from_gimbab_or_shops(sessions):
+    """한 번 읽은 상품은 다시 읽지 않음 · 김밥레코즈 판본 · 판매처 · SNS 출처뿐인 상품은 열지 않음 · 다시 만든 후보에도 그대로"""
+    w, web_search = found_web(), searcher()
+    web_search.g["Silica Gel"][0]["purchase_url"] = None
+    web_search.g["Silica Gel"][0]["evidence"] = ev("https://www.instagram.com/p/abc", "인스타 글")
+    web_search.pages = FakePages({LABEL_URL: "실리카겔 정규 2집 2CD · 디지팩"})
+    llm = FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM}, genres={"Silica Gel": ["PSYCHEDELIC"]},
+                  products={"2CD": {"isProductPage": True, "summary": "", "facts": ["구성: CD 2장 · 디지팩"], "care": [], "detailImages": []}})
+    run = lambda: runner.run("dawn", sessions, Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"),
+                                                        studio=FakeStudio(), searcher=web_search, llm=llm), ["검정치마"])
+    out = run()
+    assert web_search.pages.read_urls == [LABEL_URL] and out["stats"]["product_detail_no_page"] == 1   # 인스타 출처뿐인 굿즈
+    pa = payloads(sessions, "ALBUM")["POWER ANDRE 99"]
+    cd = next(x for x in pa["physical_albums"] if x["format"] == "CD")
+    assert cd["description"].startswith("## 상품 정보\n- 구성: CD 2장 · 디지팩") and "detail_image_urls" not in cd
+    lp = next(x for x in pa["physical_albums"] if x["format"] == "LP")
+    assert lp["external_id"].startswith("gimbab-") and "description" not in lp                       # 김밥레코즈는 판 사실만
+    with sessions() as s:
+        s.execute(update(dbm.RawPage).where(dbm.RawPage.source == "musicbrainz").values(fetched_at=dbm.now() - timedelta(days=8)))
+        s.commit()
+    run()
+    assert web_search.pages.read_urls == [LABEL_URL]                                                # 다시 읽지 않음
+    cd2 = next(x for x in payloads(sessions, "ALBUM")["POWER ANDRE 99"]["physical_albums"] if x["format"] == "CD")
+    assert cd2["description"] == cd["description"]                                                  # 다시 만든 후보에도 그대로
+
+
+def test_discogs_edition_description_comes_from_discogs_release_data(sessions):
+    """11/26 Discogs 판본 — 판 정보 · 수록곡 · 출처 (Gemini 안 씀 · 모르는 일 00 은 뺌) · 쓸 것이 없으면 칸이 없음"""
+    w = web()
+    w.add("artist/bs?", {"id": "bs", "name": "검정치마", "aliases": [],
+                         "relations": [{"type": "discogs", "url": {"resource": "https://www.discogs.com/artist/9"}}]})
+    w.add("api.discogs.com/artists/9", {"id": 9, "name": "The Black Skirts"})
+    w.add("database/search?artist=The%20Black%20Skirts", {"results": [{"id": 5, "format": ["Vinyl"]}, {"id": 6, "format": ["CD"]}]})
+    w.add("api.discogs.com/releases/5", {"id": 5, "title": "201", "artists": [{"id": 9}], "released": "2021-06-00", "country": "South Korea",
+                                         "uri": "https://www.discogs.com/release/5-201",
+                                         "formats": [{"name": "Vinyl", "qty": "2", "descriptions": ["LP", "Album", "Reissue"], "text": "Clear"}],
+                                         "labels": [{"name": "Damn Rascals", "catno": "DR-001"}],
+                                         "tracklist": [{"position": "A1", "type_": "track", "title": "Antifreeze"},
+                                                       {"position": "", "type_": "heading", "title": "Side B"},
+                                                       {"position": "B1", "type_": "track", "title": "Dientes"}]})
+    w.add("api.discogs.com/releases/6", {"id": 6, "title": "201", "artists": [{"id": 9}], "formats": [{"name": "CD"}]})
+    p = Pipeline(sessions, make_http(sessions, w), settings(discogs_token="T"), llm=None, studio=FakeStudio())
+    p.artists(["검정치마"])
+    phys = {x["format"]: x for x in payloads(sessions, "ALBUM")["201"]["physical_albums"]}
+    assert phys["LP"]["description"] == "\n".join([
+        "## 판 정보", "- 형식: LP 2장 · 정규 · 재발매", "- 색: Clear", "- 레이블: Damn Rascals (DR-001)", "- 발매: 2021-06 · 한국", "",
+        "## 수록곡", "- A1 Antifreeze", "- B1 Dientes", "", "정보 출처: Discogs (https://www.discogs.com/release/5-201)"])
+    assert "description" not in phys["CD"]                                    # 형식뿐 — 판 이름에 이미 있음
+
+
 def test_musicbrainz_later_adds_a_found_album_under_the_same_key(sessions):
     """웹 검색으로 먼저 보낸 앨범이 나중에 MusicBrainz 에 생기면 같은 후보(같은 external_id)를 MusicBrainz 값으로 고침 — 둘이 되지 않음"""
     w, web_search = found_web(), searcher()

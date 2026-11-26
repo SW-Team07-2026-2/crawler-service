@@ -31,3 +31,12 @@ def slices(data: bytes, width: int = WIDTH, height: int = HEIGHT, limit: int = M
         img.crop((0, top, img.width, min(img.height, top + height))).save(buf, "JPEG", quality=85)
         out.append(buf.getvalue())
     return out
+
+
+def size(data: bytes) -> tuple[int, int]:
+    """11/26 (너비, 높이) — 이미지가 아니면 ValueError (상세 이미지 고르기: 아이콘 · 작은 썸네일 빼기)"""
+    try:
+        img = Image.open(io.BytesIO(data))
+        return img.width, img.height
+    except Exception as e:
+        raise ValueError(f"이미지가 아님: {type(e).__name__}") from None

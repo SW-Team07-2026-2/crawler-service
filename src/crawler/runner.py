@@ -62,6 +62,7 @@ def run(kind: str, sessions, pipeline: Pipeline, seeds: list[str]) -> dict:
                 errors.insert(0, first)
     stage("다시 하기", lambda: pipeline.retry(names=kind == "dawn"))   # 못 끝낸 이름 · 공연을 한 번 더 — 남으면 다음 실행 맨 앞에
     stage("소개 글", pipeline.describe)                               # 11/25 아티스트 · 앨범 소개 글 — 저녁 · 점심 모두 (실행마다 정해진 수만큼)
+    stage("상품 상세", pipeline.product_details)                      # 11/26 굿즈 · 웹 검색 판본 상세 설명 — 공식 판매 페이지 (실행마다 정해진 수만큼)
     stage("전송", pipeline.send)
     status = "FAILED" if errors else "DONE"
     error = " | ".join(errors)[:2000] or None
