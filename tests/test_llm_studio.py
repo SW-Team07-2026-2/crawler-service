@@ -255,3 +255,19 @@ def test_studio_token_and_retry_on_503_only():
 def test_studio_needs_crawler_secret():
     with pytest.raises(ValueError):
         Studio("http://studio:8085", None)
+
+
+def test_cooldown_left_tells_how_long_to_wait_and_none_on_daily_quota():
+    """11/26 쉬는 중이면 남은 초 · 지금 불러도 되면 0 · 하루 한도면 None (실행 안에서 기다려도 소용없음)"""
+    busy = lambda: errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
+    now, sleeps = [0.0], []
+    llm = Llm(None, "m", client=fake_client(*[busy() for _ in range(5)]), sleep=sleeps.append, gap=0, clock=lambda: now[0])
+    assert llm.cooldown_left() == 0.0
+    with pytest.raises(LlmSkip, match="unavailable"):
+        llm.artist_info("A", [], [], None)
+    now[0] = 200
+    assert llm.cooldown_left() == 1000
+    llm.wait(1000)
+    assert sleeps[-1] == 1000
+    llm._quota = True
+    assert llm.cooldown_left() is None

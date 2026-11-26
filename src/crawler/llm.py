@@ -166,6 +166,17 @@ class Llm:
         """지금 부르면 안 됨 — 하루 한도(이번 실행 끝까지) · 서버가 계속 응답 못 함(COOLDOWN 동안)"""
         return self._quota or (self._down_until is not None and self._clock() < self._down_until)
 
+    def cooldown_left(self) -> float | None:
+        """11/26 쉬는 중이면 남은 초 (0 = 지금 불러도 됨) · 하루 한도면 None (이번 실행에는 다시 못 부름)"""
+        if self._quota:
+            return None
+        if self._down_until is None:
+            return 0.0
+        return max(0.0, self._down_until - self._clock())
+
+    def wait(self, seconds: float):
+        self._sleep(seconds)
+
     def extract(self, system: str, content: str | list, schema: dict) -> dict:
         """content: 글 또는 [이미지 Part …, 글 Part]"""
         r = self._generate(content, types.GenerateContentConfig(

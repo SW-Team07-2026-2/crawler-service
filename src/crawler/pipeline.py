@@ -23,7 +23,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 
 from . import db as dbm
 from . import describe as desc
@@ -45,6 +45,12 @@ SEND = [  # (type, 경로, 한 요청 최대 건수) — 계약 2장 순서
     ("CONCERT", "/internal/crawl/concerts", 100),
 ]
 _NONE = {"", "NONE", "UNKNOWN"}
+# 11/26 관리자 확인 표시 — 보낼 때 붙임 (저장한 값은 그대로). 아티스트 · 앨범은 evidence(for: identity · check · Studio 가 Catalog 로 보낼 때 뺌),
+# 공연은 reviewNotes 에 MARK 로 시작하는 줄. 관리자 화면이 Studio 후보만 보므로 크롤러 상태(판단 전 · 보류 · 뺌)를 여기로 알림
+MARK = "[크롤러] "
+SKIP_WHY = {"MAINSTREAM": "대중 가수 · 공연", "HIPHOP": "힙합", "NOT_CONCERT": "공연이 아님"}
+LLM_WAIT_BUDGET = 3 * 3600   # 11/26 실행마다 Gemini 쉬는 시간(503 COOLDOWN 20분)을 기다려 주는 최대 시간 — 점심(12:30) 실행이 저녁(20:00) 전에 끝나게
+MISS_WHY = {"not_found": "한국 아티스트로 못 찾음 (외국 팀 · 표기 차이 · 동명이인)", "no_releases": "MusicBrainz 에 앨범이 없음"}
 _SKIP_FOR_LLM = {"poster", "styurls"}  # 이미지는 주소 대신 이미지로 넣음
 CONCERT_VERSION = 2                    # 공연 정리 방식(프롬프트 · 입력)이 바뀌면 올림 → 같은 원문도 다시 정리
 KOPIS_HOSTS = {"www.kopis.or.kr", "kopis.or.kr"}   # Studio 가 승인할 때 옮겨 오는 곳 (app.image.import-hosts 와 같음)
@@ -81,6 +87,8 @@ class Pipeline:
         self._indistreet: list[dict] = []
         self._contexts: dict[str, dict] = {}   # 11/24 출연진 이름 → 나온 공연 (같은 이름 아티스트가 여럿일 때 고르는 근거)
         self._web_left = WEB_ARTISTS_PER_RUN
+        self._llm_wait_left = LLM_WAIT_BUDGET   # 11/26 이번 실행에 Gemini 쉬는 시간을 더 기다려 줄 수 있는 초
+        self._lineup_names: tuple | None = None   # 11/26 보낼 때 공연 라인업 → 아티스트 후보 (send 마다 새로)
         self.failures: dict[str, dict] = {}   # 11/24 알림용 — what → {count, codes: {코드: 수}, samples: [(항목, 내용)] 몇 개}
         self.reviewed: dict[tuple[str, str], str] = {}   # (CONCERT · ARTIST · ALBUM, external_id) → REJECTED · APPROVED · CHANGED (load_reviewed)
         self._articles: dict[str, dict | None] = {}     # 11/25 아티스트 키 → 한국어 위키백과 문서 (이번 실행 · 앨범 소개 글에도 씀)
@@ -395,7 +403,7 @@ class Pipeline:
     def _reask(self):
         """Gemini 가 응답하지 않아 판단(인디 여부 · 장르 · 한글 이름)을 못 한 아티스트를 MusicBrainz id 로 다시 불러 물음.
         11/24 · 11/25 새벽 503 으로 168팀이 판단 없이 남았는데, 점심 실행은 공연만 해서 다음 새벽까지 그대로였음 (11/25).
-        MusicBrainz 는 캐시(7일)라 요청이 거의 나가지 않음 · Gemini 가 쉬는 중(llm.exhausted)이면 남은 팀은 다음 실행에."""
+        MusicBrainz 는 캐시(7일)라 요청이 거의 나가지 않음 · Gemini 가 쉬는 중이면 실행 몫 안에서 기다렸다 이어서 (11/26 · `_llm_usable`) · 하루 한도 · 몫을 넘으면 남은 팀은 다음 실행에."""
         if self.llm is None:
             return
         with self.sessions() as s:
@@ -403,7 +411,7 @@ class Pipeline:
             links = s.execute(select(dbm.ArtistLink.site_id, dbm.ArtistLink.key).where(
                 dbm.ArtistLink.site == "musicbrainz", dbm.ArtistLink.key.in_(keys)).order_by(dbm.ArtistLink.id)).all() if keys else []
         for n, (mbid, _) in enumerate(links):
-            if getattr(self.llm, "exhausted", False):
+            if not self._llm_usable():
                 self.stats["artist_reask_deferred"] += len(links) - n
                 break
             try:
@@ -415,6 +423,21 @@ class Pipeline:
             left = s.scalars(select(dbm.Item.key).where(dbm.Item.type == "ARTIST", dbm.Item.input_hash == "not-judged")).all()
         if left:
             self.stats["artist_not_judged_left"] = len(left)
+
+    def _llm_usable(self) -> bool:
+        """Gemini 를 지금 부를 수 있음 — 쉬는 중(503 COOLDOWN)이면 실행 몫(LLM_WAIT_BUDGET) 안에서 기다렸다가 다시.
+        11/26 점심 실행이 쉬는 중이라 판단 15팀(156팀 미룸) · 소개 글 0 으로 끝남 → 다시 묻기 · 소개 글만 기다림 (공연은 그대로 다음 실행에).
+        하루 한도면 False (이번 실행에는 다시 못 부름)"""
+        if not getattr(self.llm, "exhausted", False):
+            return True
+        left = self.llm.cooldown_left() if hasattr(self.llm, "cooldown_left") else None
+        if left is None or left > self._llm_wait_left:
+            return False
+        self._llm_wait_left -= left
+        self.stats["llm_cooldown_waited_s"] += int(left)
+        log.info("llm_cooldown_wait seconds=%s budget_left=%s", int(left), int(self._llm_wait_left))
+        self.llm.wait(left)
+        return not self.llm.exhausted
 
     def _retries(self, kind: str) -> dict[str, str]:
         """{key: value} — 실패 횟수가 MAX_TRIES 보다 적은 것만, 먼저 실패한 순"""
@@ -748,7 +771,7 @@ class Pipeline:
                 owner = item.key if type_ == "ARTIST" else payload["artist_ref"]["external_id"]
                 if owner not in artists:
                     continue                             # 아티스트를 뺐거나(SKIPPED) 아직 없음
-                if getattr(self.llm, "exhausted", False) or left[type_] <= 0:
+                if left[type_] <= 0 or not self._llm_usable():
                     self.stats[f"describe_{type_.lower()}_deferred"] += 1
                     continue
                 try:
@@ -873,6 +896,7 @@ class Pipeline:
 
     def send(self):
         self._skip_concerts_of_skipped_artists()
+        self._lineup_names = None
         if self.studio is None:
             self.stats["send_dry_run"] += 1
             return
@@ -885,6 +909,66 @@ class Pipeline:
                     items = [i for i in items if json.loads(i.payload_json)["artist_ref"]["external_id"] in sent]
             for i in range(0, len(items), limit):
                 self._post(type_, path, items[i:i + limit])
+        self._resend_marks()
+
+    def _resend_marks(self):
+        """11/26 이미 보낸 후보의 확인 표시가 바뀌면 다시 보냄 — 판단이 끝남 · 크롤러가 뺌(SKIPPED) · 보류(HOLD).
+        Studio 대기열은 크롤러가 나중에 뺀 것을 모름 (11/26 비와이 · 주니엘 · 공연 4건이 대기로 남아 있었음) → 관리자 화면이 표시를 보고 거절.
+        상태(SENT · SKIPPED · HOLD)는 그대로 · Studio 가 거절한 것(REVIEWED)은 보내지 않음."""
+        for type_, path, limit in SEND:
+            with self.sessions() as s:
+                rows = s.scalars(select(dbm.Item).where(
+                    dbm.Item.type == type_, dbm.Item.status.in_(("SENT", "SKIPPED", "HOLD")), dbm.Item.sent_hash.is_not(None),
+                    or_(dbm.Item.studio_result.is_(None), dbm.Item.studio_result != "REVIEWED")).order_by(dbm.Item.id)).all()
+            todo = [r for r in rows if self._marked(r)["source_hash"] != r.sent_hash]   # 표시 · 라인업 연결이 바뀐 것만
+            self.stats[f"send_{type_.lower()}_marks"] += len(todo)
+            for i in range(0, len(todo), limit):
+                self._post(type_, path, todo[i:i + limit], keep_status=True)
+
+    def _lineup(self, names: list[str]) -> list[dict]:
+        """11/26 공연 라인업 이름마다 어느 아티스트 후보인지(externalId) 또는 왜 없는지(missing) — 관리자 화면이 이름 대신 id 로 맞추게.
+        영어 · 한글 이름이 달라도(BewhY · 비와이) 크롤러가 찾은 이름 연결로 같은 팀. 수집하지 못한 팀은 관리자가 라인업에 넣을 수 없음."""
+        if self._lineup_names is None:
+            with self.sessions() as s:
+                links = dict(s.execute(select(dbm.ArtistLink.site_id, dbm.ArtistLink.key).where(dbm.ArtistLink.site == "name")).all())
+                miss = dict(s.execute(select(dbm.ArtistMiss.name_norm, dbm.ArtistMiss.reason)).all())
+            self._lineup_names = (links, miss)
+        links, miss = self._lineup_names
+        out = []
+        for n in names:
+            key = links.get(norm(n))
+            out.append({"name": n, "externalId": key} if key
+                       else {"name": n, "missing": MISS_WHY.get(miss.get(norm(n)), "아직 찾지 않음 (다음 실행에)")})
+        return out
+
+    def _marked(self, item) -> dict:
+        """보낼 값 — 저장한 값에 관리자 확인 표시를 붙이고 원본 해시를 다시 셈 (Studio 는 해시가 같으면 그대로 둠)"""
+        payload = {k: v for k, v in json.loads(item.payload_json).items() if k != "source_hash"}
+        notes = []
+        if item.status == "SKIPPED":
+            why = item.error or ""
+            notes.append(f"크롤러가 뺌 ({SKIP_WHY.get(why.removeprefix('LINEUP_'), why)}"
+                         f"{' · 라인업 대부분이 뺀 팀' if why.startswith('LINEUP_') else ''}) — 승인하지 말고 거절")
+        elif item.status == "HOLD":
+            notes.append("크롤러가 보류 중 (장르를 정하지 못함) — 판단이 끝나 다시 올 때까지 승인하지 말 것")
+        if item.type == "ARTIST" and item.input_hash == "not-judged" and item.status != "SKIPPED":
+            notes.append("판단 전 — 인디 여부 · 장르 · 한글 이름을 지금 기준으로 아직 묻지 못함 (장르 · 이름은 이전 값 · 다음 실행에 다시 물음)")
+        if item.type == "CONCERT":
+            c = dict(payload["concert"])
+            if "reviewNotes" in c or notes:   # 11/22 전 공연은 키가 없음 — 표시가 없으면 그대로 (해시가 같아 다시 가지 않게)
+                c["reviewNotes"] = [n for n in c.get("reviewNotes") or [] if not n.startswith(MARK)] + [MARK + n for n in notes]
+            c["lineup"] = self._lineup(c.get("artistNames") or [])
+            payload["concert"] = c
+        else:
+            evidence = [e for e in payload.get("evidence") or [] if e.get("for") not in ("identity", "check")]
+            if item.origin and "musicbrainz.org/" in item.origin:   # 동명이인 확인용 — 어느 MusicBrainz 아티스트 · 앨범에서 왔는지
+                evidence.insert(0, {"for": "identity", "site": "MusicBrainz", "url": item.origin,
+                                    "title": payload.get("name") or payload.get("title")})
+            evidence += [{"for": "check", "note": n} for n in notes]
+            if evidence:
+                payload["evidence"] = evidence
+        payload["source_hash"] = content_hash(payload)
+        return payload
 
     def _skip_concerts_of_skipped_artists(self):
         """11/24 라인업에서 확인된 팀(우리가 아는 아티스트) 중 절반 넘게가 뺀 아티스트(대중 · 힙합)면 공연도 뺌 — 공연 판단(Gemini)이 놓친 것.
@@ -906,33 +990,38 @@ class Pipeline:
                 self.stats["concert_skipped_lineup"] += 1
             s.commit()
 
-    def _post(self, type_: str, path: str, items: list):
-        """한 묶음 전송. 400 이면 반으로 나눠 다시 — 잘못된 한 건만 FAILED 로 남깁니다."""
+    def _post(self, type_: str, path: str, items: list, keep_status: bool = False):
+        """한 묶음 전송. 400 이면 반으로 나눠 다시 — 잘못된 한 건만 FAILED 로 남깁니다 (표시만 다시 보낸 것은 상태를 바꾸지 않음)."""
+        payloads = [self._marked(i) for i in items]
         try:
-            result = self.studio.post(path, {"items": [json.loads(i.payload_json) for i in items]})
+            result = self.studio.post(path, {"items": payloads})
         except StudioRejected as e:
             if e.status == 400 and len(items) > 1:
                 mid = len(items) // 2
-                self._post(type_, path, items[:mid])
-                self._post(type_, path, items[mid:])
+                self._post(type_, path, items[:mid], keep_status)
+                self._post(type_, path, items[mid:], keep_status)
                 return
             if e.status != 400:
                 raise                                  # 401 · 5xx — 실행을 멈추고 다음 실행에 다시
-            self._mark(items, "FAILED", error=str(e))
+            if not keep_status:
+                self._mark(items, "FAILED", error=str(e))
             self.stats[f"send_{type_.lower()}_failed"] += len(items)
             return
         by_key = {r["external_id"]: r["result"] for r in result.get("items", [])}
-        self._mark(items, "SENT", results=by_key)
+        self._mark(items, None if keep_status else "SENT", results=by_key,
+                   hashes={i.id: p["source_hash"] for i, p in zip(items, payloads)})
         for r in by_key.values():
             self.stats[f"send_{type_.lower()}_{r.lower()}"] += 1
 
-    def _mark(self, items, status, error=None, results=None):
+    def _mark(self, items, status, error=None, results=None, hashes=None):
+        """status 가 None 이면 보낸 기록(보낸 해시 · Studio 결과)만 남김"""
         with self.sessions() as s:
             for i in items:
                 row = s.get(dbm.Item, i.id)
-                row.status, row.error, row.updated_at = status, error, dbm.now()
-                if status == "SENT":
-                    row.sent_hash = row.source_hash
+                if status is not None:
+                    row.status, row.error, row.updated_at = status, error, dbm.now()
+                if status in ("SENT", None):
+                    row.sent_hash = (hashes or {}).get(row.id, row.source_hash)   # 보낸 값(표시 포함)의 해시
                     row.studio_result = (results or {}).get(row.key)
             s.commit()
 
