@@ -555,6 +555,63 @@ def test_concert_reads_poster_and_intro_images_and_builds_description(sessions):
         "정보 출처: 공연예술통합전산망(KOPIS)"])                    # 가격 · 예매처 안내는 넣지 않음 (indig 가 직접 판매)
 
 
+def test_description_keeps_what_intro_images_say_beyond_the_summary(sessions):
+    """11/26 소개 이미지의 출연진 소개 · 곡목 · 타임테이블 · 부대 행사 → 상세 설명. 관람 연령만 다시 적은 줄 · 개인 정보 문장은 뺌"""
+    w, studio = web(), FakeStudio()
+    llm = FakeLlm(concerts={"PF100": {**INDIE,
+        "performers": [{"name": "실리카겔", "intro": "2013년 결성한 4인조 밴드다. 멤버 모두 같은 대학을 졸업했다."},
+                       {"name": "게스트", "intro": ""}],
+        "program": ["1부 · 정규 2집 수록곡", " 2부 ·  신곡 ", "2부 · 신곡"],
+        "timetable": ["12/12(토) MAIN 18:00 실리카겔"],
+        "events": ["공연 후 사인회 (앨범 구매자)"],
+        "notices": ["만 12세 이상 관람 가능", "입장 시 신분증으로 연령 확인", "공연 시작 30분 전 입장"]},
+        "PF200": MAINSTREAM})
+    runner.run("lunch", sessions, pipeline(sessions, w, studio, llm), [])
+    [item] = studio.posts[0][1]["items"]
+    d = item["concert"]["description"]
+    assert d.startswith("\n".join(["실리카겔의 단독 공연.", "",
+        "## 출연진 소개", "- **실리카겔** — 2013년 결성한 4인조 밴드다.", "",       # 학교 문장 · 소개 없는 게스트는 뺌
+        "## 프로그램", "- 1부 · 정규 2집 수록곡", "- 2부 · 신곡", "",
+        "## 타임테이블", "- 12/12(토) MAIN 18:00 실리카겔", "",
+        "## 일정"]))
+    assert "\n".join(["## 관람 안내", "- 관람 연령: 만 12세 이상", "- 입장 시 신분증으로 연령 확인", "- 공연 시작 30분 전 입장", "",
+                      "## 부대 행사", "- 공연 후 사인회 (앨범 구매자)", "", "## 공연장"]) in d
+
+
+def test_only_age_lines_are_dropped_and_lines_with_more_are_kept():
+    from crawler.pipeline import _only_age
+    assert all(_only_age(n) for n in ["만 7세 이상 관람 가능", "전체 관람가", "본 공연은 7세 이상 관람가입니다.", "만 12세 이상 입장 가능"])
+    assert not any(_only_age(n) for n in ["입장 시 신분증으로 연령 확인", "공연 시작 30분 전 입장", "8세 이상 관람가 (2018년생부터)",
+                                          "전체 관람가 (7세 미만 무료입장)"])
+
+
+def test_concerts_read_the_old_way_are_read_again_a_few_per_run(sessions, monkeypatch):
+    """11/26 CONCERT_VERSION 3 — 원문이 같아도 실행마다 CONCERT_REREAD 건까지 다시 정리 · 뺀 공연(SKIPPED)은 다시 보지 않음"""
+    from crawler import pipeline as pl
+    w = web()
+    monkeypatch.setattr(pl, "CONCERT_VERSION", 2)
+    runner.run("lunch", sessions, pipeline(sessions, w, FakeStudio()), [])
+    monkeypatch.setattr(pl, "CONCERT_VERSION", 3)
+    monkeypatch.setattr(pl, "CONCERT_REREAD", 0)
+    expire_kopis(sessions)
+    llm = FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM})
+    p = pipeline(sessions, w, FakeStudio(), llm)
+    runner.run("lunch", sessions, p, [])
+    assert not any(c.startswith("concert:") for c in llm.calls) and p.stats["concert_reread_deferred"] == 1   # 몫이 없으면 다음에
+    monkeypatch.setattr(pl, "CONCERT_REREAD", 5)
+    expire_kopis(sessions)
+    llm = FakeLlm(concerts={"PF100": {**INDIE, "program": ["1부"]}, "PF200": MAINSTREAM})
+    studio = FakeStudio()
+    runner.run("lunch", sessions, pipeline(sessions, w, studio, llm), [])
+    assert [c for c in llm.calls if c.startswith("concert:")] == ["concert:PF100"]                   # 뺀 PF200 은 다시 묻지 않음
+    [item] = studio.posts[0][1]["items"]
+    assert "## 프로그램\n- 1부" in item["concert"]["description"]
+    expire_kopis(sessions)
+    llm = FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM})
+    runner.run("lunch", sessions, pipeline(sessions, w, FakeStudio(), llm), [])
+    assert not any(c.startswith("concert:") for c in llm.calls)                                       # 다시 정리한 것은 한 번만
+
+
 def test_changed_kopis_detail_is_sent_again_and_same_detail_is_not(sessions):
     w = web()
     runner.run("lunch", sessions, pipeline(sessions, w, FakeStudio()), [])
