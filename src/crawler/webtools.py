@@ -103,6 +103,10 @@ class PageReader:
         self.fetches += 1
         return final, "\n\n".join(res.get("content") or [])
 
+    def check_public(self, url: str):
+        """11/26 페이지 안에서 찾은 주소(상세 이미지)도 같은 검사 — 공개 주소가 아니면 Blocked"""
+        self._public(url)
+
     def _public(self, url: str):
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
