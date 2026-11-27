@@ -25,7 +25,7 @@ def settings(**over) -> Settings:
 
 
 class FakeWeb:
-    """주소 조각 → (상태, 본문). 먼저 넣은 규칙이 이깁니다. 부른 주소는 calls 에. 이미지 같은 바이트는 add_bytes."""
+    """주소 조각 -> (상태, 본문). 먼저 넣은 규칙이 이깁니다. 부른 주소는 calls 에. 이미지 같은 바이트는 add_bytes."""
 
     def __init__(self, routes=None):
         self.routes = list(routes or [])
@@ -60,20 +60,20 @@ def make_http(sessions, web) -> Http:
 
 class FakeLlm:
     def __init__(self, concerts=None, genres=None, names=None, mainstream=(), picks=None, describes=None, products=None):
-        self.concerts = concerts or {}      # mt20id → 결과
-        self.genres = genres or {}          # 이름 → 장르
-        self.names = names or {}            # 이름 → 한글 활동명
-        self.web: dict[str, list[str]] = {} # 이름 → 한글 이름 근거로 넘긴 웹 검색 조각
+        self.concerts = concerts or {}      # mt20id -> 결과
+        self.genres = genres or {}          # 이름 -> 장르
+        self.names = names or {}            # 이름 -> 한글 활동명
+        self.web: dict[str, list[str]] = {} # 이름 -> 한글 이름 근거로 넘긴 웹 검색 조각
         self.mainstream = set(mainstream)   # 대중 쪽으로 볼 이름 (나머지는 INDIE)
-        self.picks = picks or {}            # 이름 → 같은 이름 후보 중 고를 id
-        self.picked: dict[str, tuple] = {}  # 이름 → (후보 id 들, 공연 정보)
+        self.picks = picks or {}            # 이름 -> 같은 이름 후보 중 고를 id
+        self.picked: dict[str, tuple] = {}  # 이름 -> (후보 id 들, 공연 정보)
         self.calls: list[str] = []
-        self.facts: dict[str, dict] = {}    # mt20id → Haiku 에 넘긴 값
-        self.images: dict[str, int] = {}    # mt20id → 이미지 조각 수
-        self.describes = describes or {}    # 아티스트 이름 · 앨범 제목 → 소개 글 문장 [{text, source}]
-        self.described: list[tuple[str, list]] = []   # (이름 · 제목, 넘긴 출처)
-        self.products = products or {}      # 11/26 상품 이름 → 상세 정리 결과
-        self.product_images: dict[str, int] = {}   # 상품 이름 → 넘긴 이미지 수
+        self.facts: dict[str, dict] = {}    # mt20id -> Haiku 에 넘긴 값
+        self.images: dict[str, int] = {}    # mt20id -> 이미지 조각 수
+        self.describes = describes or {}    # 아티스트 이름, 앨범 제목 -> 소개 글 문장 [{text, source}]
+        self.described: list[tuple[str, list]] = []   # (이름, 제목, 넘긴 출처)
+        self.products = products or {}      # 상품 이름 -> 상세 정리 결과
+        self.product_images: dict[str, int] = {}   # 상품 이름 -> 넘긴 이미지 수
         self.input_tokens = self.output_tokens = 0
 
     def concert(self, facts, images=None):
@@ -109,7 +109,7 @@ class FakeStudio:
     def __init__(self, reject=None, reviewed=None):
         self.posts: list[tuple[str, dict]] = []
         self.reject = reject                 # 이 external_id 가 묶음에 있으면 400
-        self.reviewed = reviewed             # GET /internal/crawl/reviewed 응답 · "down" 이면 실패
+        self.reviewed = reviewed             # GET /internal/crawl/reviewed 응답, "down" 이면 실패
         self.gets: list[str] = []
 
     def get(self, path):
@@ -128,7 +128,7 @@ class FakeStudio:
 
 
 def response(text=None, finish="STOP", calls=(), block=None):
-    """Gemini 응답 (SDK 의 실제 타입) — calls: [(함수 이름, 인자)]"""
+    """Gemini 응답 (SDK 의 실제 타입) - calls: [(함수 이름, 인자)]"""
     from google.genai import types
     parts = [types.Part(function_call=types.FunctionCall(id=f"call-{i}", name=n, args=a)) for i, (n, a) in enumerate(calls)]
     if text is not None:
@@ -141,7 +141,7 @@ def response(text=None, finish="STOP", calls=(), block=None):
 
 
 class FakeModels:
-    """client.models.generate_content — replies 를 차례로 돌려줌 (예외면 던짐). 받은 요청은 requests 에 (contents 는 그때 모양으로)"""
+    """client.models.generate_content - replies 를 차례로 돌려줌 (예외면 던짐). 받은 요청은 requests 에 (contents 는 그때 모양으로)"""
 
     def __init__(self, replies):
         self.replies, self.requests = list(replies), []

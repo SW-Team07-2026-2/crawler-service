@@ -1,7 +1,7 @@
-"""MusicBrainz API — 아티스트 · 앨범(release group) · 트랙 · 레이블.
+"""MusicBrainz API - 아티스트, 앨범(release group), 트랙, 레이블.
 
-쓰는 것은 CC0 인 핵심 데이터(이름 · 별칭 · 앨범 · 트랙 · 날짜 · 레이블)뿐입니다.
-태그 · 장르 연결은 보조 데이터(CC BY-NC-SA — 비상업)라 가져오지 않습니다 (doc/MusicBrainz_Database).
+쓰는 것은 CC0 인 핵심 데이터(이름, 별칭, 앨범, 트랙, 날짜, 레이블)뿐입니다.
+태그, 장르 연결은 보조 데이터(CC BY-NC-SA - 비상업)라 가져오지 않습니다 (doc/MusicBrainz_Database).
 """
 import json
 from datetime import timedelta
@@ -18,12 +18,12 @@ def _get(http, path: str, days: int) -> dict:
 
 
 def find_artist(http, name: str, pick=None) -> dict | None:
-    """이름으로 찾기 — 이름(또는 별칭)이 정규화해서 같은 한국 아티스트. 그중 하나는 점수 95 이상이어야 함.
-    11/24 같은 이름의 한국 아티스트가 둘 이상이면(정우: NCT · 인디 싱어송라이터 · 배우 · TREASURE — 전에는 점수 높은 NCT 를 골랐음)
-    pick(후보 검색 결과 목록) → 고른 id 로 정하고, pick 이 없거나 못 고르면 None (억지로 고르지 않음).
-    띄어쓰기가 다르면 검색이 못 찾습니다 (브로콜리너마저 ↔ 브로콜리 너마저) — 시드에는 MusicBrainz 표기나 영문 이름을 씁니다."""
+    """이름으로 찾기 - 이름(또는 별칭)이 정규화해서 같은 한국 아티스트. 그중 하나는 점수 95 이상이어야 함.
+    같은 이름의 한국 아티스트가 둘 이상이면(정우: NCT, 인디 싱어송라이터, 배우, TREASURE - 전에는 점수 높은 NCT 를 골랐음)
+    pick(후보 검색 결과 목록) -> 고른 id 로 정하고, pick 이 없거나 못 고르면 None (억지로 고르지 않음).
+    띄어쓰기가 다르면 검색이 못 찾습니다 (브로콜리너마저 <-> 브로콜리 너마저) - 시드에는 MusicBrainz 표기나 영문 이름을 씁니다."""
     safe = name.replace('"', " ")
-    q = quote(f'artist:"{safe}" OR alias:"{safe}"')         # 한글 이름이 별칭에만 있는 경우가 많음 (SE SO NEON · 새소년)
+    q = quote(f'artist:"{safe}" OR alias:"{safe}"')         # 한글 이름이 별칭에만 있는 경우가 많음 (SE SO NEON, 새소년)
     found = _get(http, f"artist?query={q}&fmt=json&limit=5", days=30).get("artists", [])
     target = norm(name)
     same = []
@@ -31,7 +31,7 @@ def find_artist(http, name: str, pick=None) -> dict | None:
         names = {norm(a.get("name", "")), norm(a.get("sort-name", ""))} | {norm(x.get("name", "")) for x in a.get("aliases", [])}
         if target not in names:
             continue
-        # 나라가 비어 있고 도시만 있는 경우가 있음 (Say Sue Me → Busan) — 그때는 지역을 따라 올라가 봄
+        # 나라가 비어 있고 도시만 있는 경우가 있음 (Say Sue Me -> Busan) - 그때는 지역을 따라 올라가 봄
         if a.get("country") == "KR" or (a.get("country") is None and _in_korea(http, a.get("area") or a.get("begin-area"))):
             same.append(a)
     if not any(a.get("score", 0) >= 95 for a in same):
@@ -43,8 +43,8 @@ def find_artist(http, name: str, pick=None) -> dict | None:
 
 
 def bands_of(http, person: str) -> list[str]:
-    """사람 이름 → 그 사람이 멤버인 밴드 · 팀 이름 (MusicBrainz "member of band"). 공연 출연진이 멤버 실명일 때 팀 이름 힌트로 씁니다.
-    이름(또는 별칭)이 정확히 같고 점수 95 이상인 한국 사람만 · 같은 이름이 여럿이면 모두의 팀을 돌려줍니다 (Gemini 가 포스터로 확인)."""
+    """사람 이름 -> 그 사람이 멤버인 밴드, 팀 이름 (MusicBrainz "member of band"). 공연 출연진이 멤버 실명일 때 팀 이름 힌트로 씁니다.
+    이름(또는 별칭)이 정확히 같고 점수 95 이상인 한국 사람만, 같은 이름이 여럿이면 모두의 팀을 돌려줍니다 (Gemini 가 포스터로 확인)."""
     safe = person.replace('"', " ")
     q = quote(f'(artist:"{safe}" OR alias:"{safe}") AND type:person')
     found = _get(http, f"artist?query={q}&fmt=json&limit=5", days=30).get("artists", [])
@@ -63,7 +63,7 @@ def bands_of(http, person: str) -> list[str]:
 
 
 def _in_korea(http, area: dict | None, depth: int = 0) -> bool:
-    """지역(도시 · 구)이 한국인지 — ISO 코드(KR · KR-26)를 보거나 "part of" 로 위 지역을 따라 올라감 (최대 4단계)"""
+    """지역(도시, 구)이 한국인지 - ISO 코드(KR, KR-26)를 보거나 "part of" 로 위 지역을 따라 올라감 (최대 4단계)"""
     if not area or not area.get("id"):
         return False
     a = _get(http, f"area/{area['id']}?inc=area-rels&fmt=json", days=180)
@@ -75,10 +75,10 @@ def _in_korea(http, area: dict | None, depth: int = 0) -> bool:
 
 
 def artist(http, mbid: str) -> dict:
-    """discogs: MusicBrainz 편집자가 이어 둔 Discogs 아티스트 id (하나일 때만 — 이름으로 찾으면 동명이인이 섞임)
-    legal_names: 별칭 중 본명 (11/23 한글 이름을 고를 때 본명은 쓰지 않음 — ASH ISLAND 의 별칭 윤진영)
-    gender · composition: 11/22 Catalog 필터 값 (lineup 참고) — 확실하지 않으면 None
-    wikidata: 11/25 MusicBrainz 편집자가 이어 둔 Wikidata 항목 id (Q…) — 소개 글 출처 (sources/wikipedia) · 하나일 때만"""
+    """discogs: MusicBrainz 편집자가 이어 둔 Discogs 아티스트 id (하나일 때만 - 이름으로 찾으면 동명이인이 섞임)
+    legal_names: 별칭 중 본명 (한글 이름을 고를 때 본명은 쓰지 않음 - ASH ISLAND 의 별칭 윤진영)
+    gender, composition: Catalog 필터 값 (lineup 참고) - 확실하지 않으면 None
+    wikidata: MusicBrainz 편집자가 이어 둔 Wikidata 항목 id (Q...) - 소개 글 출처 (sources/wikipedia), 하나일 때만"""
     a = _get(http, f"artist/{mbid}?inc=aliases+url-rels+artist-rels&fmt=json", days=7)
     links = {r["url"]["resource"].rstrip("/").rsplit("/", 1)[-1] for r in a.get("relations", [])
              if r.get("type") == "discogs" and "/artist/" in r.get("url", {}).get("resource", "")}
@@ -91,12 +91,12 @@ def artist(http, mbid: str) -> dict:
             "wikidata": wikidata.pop() if len(wikidata) == 1 else None}
 
 
-GENDERS = {"Male": "MALE", "Female": "FEMALE"}   # Other · Non-binary · Not applicable 은 Catalog 값이 없음 → None
+GENDERS = {"Male": "MALE", "Female": "FEMALE"}   # Other, Non-binary, Not applicable 은 Catalog 값이 없음 -> None
 
 
 def lineup(http, a: dict) -> tuple[str | None, str | None]:
-    """(성별, 구성) — 구성은 지금 활동 인원으로 정합니다 (팀 이름이어도 한 명만 남았으면 SOLO).
-    사람(Person)은 SOLO · 성별 그대로. 팀은 "member of band" 중 끝나지 않은 멤버로:
+    """(성별, 구성) - 구성은 지금 활동 인원으로 정합니다 (팀 이름이어도 한 명만 남았으면 SOLO).
+    사람(Person)은 SOLO, 성별 그대로. 팀은 "member of band" 중 끝나지 않은 멤버로:
     두 명 이상이면 GROUP, 한 명이면 떠난 멤버 기록이 있을 때만 SOLO (멤버를 한 명만 적어 둔 팀일 수 있어서 그 외엔 None).
     팀 성별은 지금 멤버를 하나씩 조회해 남녀가 섞이면 MIXED, 모두 같으면 그 성별, 하나라도 모르면 None."""
     if a.get("type") == "Person":
@@ -122,7 +122,7 @@ def lineup(http, a: dict) -> tuple[str | None, str | None]:
 
 
 def release_groups(http, mbid: str) -> list[dict]:
-    """정규 · EP · 싱글 (편집 · 라이브 · OST 같은 2차 유형이 붙은 것은 뺌) — 발매일 순. 100개가 넘으면 다음 쪽까지."""
+    """정규, EP, 싱글 (편집, 라이브, OST 같은 2차 유형이 붙은 것은 뺌) - 발매일 순. 100개가 넘으면 다음 쪽까지."""
     found, offset = [], 0
     while True:
         data = _get(http, f"release-group?artist={mbid}&type=album|ep|single&fmt=json&limit=100&offset={offset}", days=7)
@@ -140,7 +140,7 @@ def release_groups(http, mbid: str) -> list[dict]:
 
 
 def first_release(http, rgid: str, days: int = 90) -> dict:
-    """그 앨범의 가장 이른 공식 발매본 — 트랙 · 레이블. 갓 나온 앨범은 트랙 · 레이블이 나중에 채워지는 일이 많아 짧게(days) 다시 봅니다."""
+    """그 앨범의 가장 이른 공식 발매본 - 트랙, 레이블. 갓 나온 앨범은 트랙, 레이블이 나중에 채워지는 일이 많아 짧게(days) 다시 봅니다."""
     data = _get(http, f"release?release-group={rgid}&status=official&inc=recordings+labels&fmt=json&limit=25", days=days)
     releases = sorted(data.get("releases", []), key=lambda r: r.get("date") or "9999")
     if not releases:

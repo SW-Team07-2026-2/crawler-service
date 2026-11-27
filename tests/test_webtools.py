@@ -19,7 +19,7 @@ def test_tavily_basic_search_in_korea_and_result_shape():
     assert {k: v for k, v in body.items() if k != "exclude_domains"} == {
         "query": "실리카겔 신보", "search_depth": "basic", "max_results": 5, "country": "south korea",
         "include_published_date": True}                                 # basic = 1크레딧 (auto_parameters 는 2크레딧이라 안 씀)
-    assert body["exclude_domains"] == ["spotify.com", "open.spotify.com"]                  # Spotify 만 뺌 (11/17 결정)
+    assert body["exclude_domains"] == ["spotify.com", "open.spotify.com"]                  # Spotify 만 뺌 (결정)
     assert t.searches == 1
 
 

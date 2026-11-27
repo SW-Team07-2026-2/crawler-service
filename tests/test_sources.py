@@ -55,12 +55,12 @@ def test_musicbrainz_picks_korean_exact_match_and_filters_groups(sessions):
     http = make_http(sessions, mb_web())
     a = musicbrainz.find_artist(http, "실리카겔")
     assert a == {"mbid": "kr", "name": "Silica Gel", "aliases": ["실리카겔"], "legal_names": [], "discogs": "6588484",
-                 "gender": None, "composition": None, "wikidata": None}   # 종류 · 멤버 기록이 없으면 모름 · Wikidata 연결 없음
+                 "gender": None, "composition": None, "wikidata": None}   # 종류, 멤버 기록이 없으면 모름, Wikidata 연결 없음
     assert musicbrainz.find_artist(http, "실리카") is None          # 이름이 정확히 같지 않으면 만들지 않음
 
     groups = musicbrainz.release_groups(http, "kr")
     assert [(g["rgid"], g["type"], g["released_at"]) for g in groups] == [
-        ("rg1", "EP", "2022-01-14"), ("rg2", "ALBUM", "2024-06-01"), ("rg4", "SINGLE", None)]   # 라이브 제외 · 연도만이면 비움
+        ("rg1", "EP", "2022-01-14"), ("rg2", "ALBUM", "2024-06-01"), ("rg4", "SINGLE", None)]   # 라이브 제외, 연도만이면 비움
 
     rel = musicbrainz.first_release(http, "rg1")
     assert rel == {"tracks": [{"track_no": 1, "title": "A"}, {"track_no": 2, "title": "B"}, {"track_no": 3, "title": "C"}],
@@ -129,7 +129,7 @@ def test_discogs_uses_linked_artist_id_and_drops_other_artists(sessions):
                            "formats": [{"name": "Vinyl", "descriptions": ["LP"], "text": "Black"}]})
     web.add("releases/2", {"id": 2, "title": "Thirsty", "artists": [{"id": 77}], "formats": [{"name": "CD"}]})   # 이름만 비슷한 다른 팀
     out = discogs.physical_by_title(make_http(sessions, web), "TOKEN", "9")
-    assert {"떠나지마", "thirsty"} <= set(out) and len(out) == 3           # 병기 제목은 전체 · 앞 · 뒤 모두로 맞춤
+    assert {"떠나지마", "thirsty"} <= set(out) and len(out) == 3           # 병기 제목은 전체, 앞, 뒤 모두로 맞춤
     assert [p["external_id"] for p in out["thirsty"]] == ["discogs-1"]
     assert out["thirsty"][0]["options"][0]["vinyl_color"] == "BLACK"
     assert not any("releases/3" in c for c in web.calls)                   # 피지컬이 아닌 판은 부르지 않음
@@ -146,7 +146,7 @@ def test_discogs_physical_options():
 
 
 def indistreet_page(albums, chunks=2):
-    """Next.js 가 넣는 모양 — 데이터 문자열을 여러 push 로 나눠 담음"""
+    """Next.js 가 넣는 모양 - 데이터 문자열을 여러 push 로 나눠 담음"""
     flight = 'a5:["$","$La6",null,' + json.dumps({"initialData": {"data": albums, "meta": {}}}, ensure_ascii=False) + "]\n"
     size = len(flight) // chunks + 1
     parts = [flight[i:i + size] for i in range(0, len(flight), size)]
@@ -172,7 +172,7 @@ def test_indistreet_reads_page_data_and_keeps_only_facts(sessions):
     assert [(a["title"], a["type"], a["released_at"]) for a in got] == [("흔한 클리셰처럼", "SINGLE", "2026-11-11"), ("PORTRAIT", "ALBUM", "2026-10-16")]
     assert got[0]["url"] == "https://indistreet.com/albums/x-d1"
     assert got[0]["artists"] == [["리플리카", "RIPLEICA", "리플리카 RIPLEICA"]]
-    assert "description" not in got[0] and "cover" not in json.dumps(got[0])        # 소개 글 · 표지는 가져오지 않음
+    assert "description" not in got[0] and "cover" not in json.dumps(got[0])        # 소개 글, 표지는 가져오지 않음
 
 
 def test_indistreet_changed_page_fails_loudly(sessions):
@@ -224,7 +224,7 @@ def test_robots_crawl_delay_is_respected(sessions):
 
 
 def test_same_name_korean_artists_are_picked_not_guessed(sessions):
-    """11/24 정우 — 같은 이름의 한국 아티스트가 여럿이면 점수 높은 쪽(NCT)을 고르지 않고 pick 에 맡김 · pick 이 없으면 만들지 않음"""
+    """정우 - 같은 이름의 한국 아티스트가 여럿이면 점수 높은 쪽(NCT)을 고르지 않고 pick 에 맡김, pick 이 없으면 만들지 않음"""
     web = FakeWeb([("/robots.txt", 200, "")])
     web.add("artist?query=", {"artists": [
         {"id": "nct", "name": "정우", "score": 100, "country": "KR", "disambiguation": "NCT", "aliases": [{"name": "Jungwoo"}]},

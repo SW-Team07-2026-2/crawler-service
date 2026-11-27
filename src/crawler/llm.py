@@ -1,16 +1,15 @@
-"""Gemini 전처리 (11/18 Anthropic Haiku → Gemini 무료 등급 · 기본 gemini-3.5-flash-lite · CRAWLER_MODEL 로 바꿈).
+"""Gemini 전처리 (Anthropic Haiku -> Gemini 무료 등급, 기본 gemini-3.5-flash-lite, CRAWLER_MODEL 로 바꿈).
 
-- 구조화 출력(response_json_schema)으로 정해진 모양 · 값만 받습니다. 모든 필드를 필수로 두고 "모름" 은 "" · -1 · NONE · UNKNOWN 으로 받아
-  코드에서 null 로 바꿉니다 (Haiku 때 스키마 그대로 · 11/18 실호출로 enum · additionalProperties 받는 것 확인).
-- 생각 수준(thinking_level)은 MEDIUM — 11/17 정확도 우선으로 HIGH 였으나 11/23 밤 HIGH 만 503 "high demand" 가 몇 시간 이어져
-  (같은 요청이 LOW · MEDIUM 은 응답) 11/24 사용자 결정으로 내림. 생각 토큰도 max_output_tokens 에 들어가므로 넉넉히 둡니다.
-- 웹 조사(research)는 우리 함수(웹 검색 · 페이지 열기)를 모델이 고르는 함수 호출 반복 — 자동 함수 호출은 끄고 직접 돌립니다
-  (도구 결과를 기록해 지어낸 출처를 거르기 위해 · sources/websearch.py).
+- 구조화 출력(response_json_schema)으로 정해진 모양, 값만 받습니다. 모든 필드를 필수로 두고 "모름" 은 "", -1, NONE, UNKNOWN 으로 받아
+  코드에서 null 로 바꿉니다 (Haiku 때 스키마 그대로, 실호출로 enum, additionalProperties 받는 것 확인).
+- 생각 수준(thinking_level)은 MEDIUM - 정확도 우선으로 HIGH 였으나 밤 HIGH 만 503 "high demand" 가 몇 시간 이어져
+  (같은 요청이 LOW, MEDIUM 은 응답) 사용자 결정으로 내림. 생각 토큰도 max_output_tokens 에 들어가므로 넉넉히 둡니다.
+- 웹 조사(research)는 우리 함수(웹 검색, 페이지 열기)를 모델이 고르는 함수 호출 반복 - 자동 함수 호출은 끄고 직접 돌립니다
+  (도구 결과를 기록해 지어낸 출처를 거르기 위해, sources/websearch.py).
 - 무료 등급 한도: 분당 요청 수를 넘지 않게 호출 사이를 띄우고, 429 는 API 가 알려 준 시간만큼 쉬었다가 다시.
-  하루 한도(PerDay)를 다 쓰면 이번 실행의 남은 호출은 모두 건너뜁니다 (LlmSkip("quota") — 다음 실행에 이어서).
-  서버 오류(500 · 503 · 504)는 1 · 2 · 4 · 8분 쉬며 다시 부르고, 그래도 계속되면 20분 동안 호출을 건너뜁니다 (LlmSkip("unavailable") ·
-  11/19 503 "high demand" 가 20분 이어져 공연 단계 전체가 멈췄음 — 다른 단계는 끝까지 돌고 남은 것은 다음 실행에).
-  20분이 지나면 한 번 다시 불러 보고(1분 쉬고 한 번 더), 되면 이어서 · 안 되면 또 20분 (11/24 · 11/25 새벽 503 한 번에 실행 끝까지
+  하루 한도(PerDay)를 다 쓰면 이번 실행의 남은 호출은 모두 건너뜁니다 (LlmSkip("quota") - 다음 실행에 이어서).
+  서버 오류(500, 503, 504)는 1, 2, 4, 8분 쉬며 다시 부르고, 그래도 계속되면 20분 동안 호출을 건너뜁니다 (LlmSkip("unavailable"), 503 "high demand" 가 20분 이어져 공연 단계 전체가 멈췄음 - 다른 단계는 끝까지 돌고 남은 것은 다음 실행에).
+  20분이 지나면 한 번 다시 불러 보고(1분 쉬고 한 번 더), 되면 이어서, 안 되면 또 20분 (, 새벽 503 한 번에 실행 끝까지
   Gemini 를 안 불러 아티스트 168팀을 못 물었음).
 """
 import json
@@ -27,15 +26,15 @@ from .keys import HANGUL, norm
 log = logging.getLogger(__name__)
 
 MAX_TOKENS = 16000     # 생각 토큰 포함
-GAP = 6.5              # 호출 사이 최소 간격(초) — 무료 등급 분당 10건 안팎 (공식 수치 비공개 · 11/18 사용자 측정 보고 기준)
+GAP = 6.5              # 호출 사이 최소 간격(초) - 무료 등급 분당 10건 안팎 (공식 수치 비공개, 사용자 측정 보고 기준)
 TRIES = 4              # 분당 한도(429) 때 다시 부르는 횟수
-SERVER_WAITS = (60, 120, 240, 480)   # 서버 오류(500 · 503 · 504) 때 쉬는 시간(초) — 11/19 503 혼잡이 20분 띄엄띄엄 이어짐 (느려도 괜찮음 · 11/17)
-COOLDOWN = 1200        # 서버 오류가 그래도 이어지면 이만큼(초) 부르지 않음 → 그 뒤 다시 불러 봄 (11/25)
+SERVER_WAITS = (60, 120, 240, 480)   # 서버 오류(500, 503, 504) 때 쉬는 시간(초) - 503 혼잡이 20분 띄엄띄엄 이어짐 (느려도 괜찮음, )
+COOLDOWN = 1200        # 서버 오류가 그래도 이어지면 이만큼(초) 부르지 않음 -> 그 뒤 다시 불러 봄
 TURNS = 16             # 웹 조사 한 번에 모델이 도구를 부르는 최대 차례
 
 
 class LlmSkip(Exception):
-    """거절 · 길이 초과 · 한도 소진 · 요청 거절(400) — 그 항목은 이번에 건너뜀 (다음 실행에 다시)"""
+    """거절, 길이 초과, 한도 소진, 요청 거절(400) - 그 항목은 이번에 건너뜀 (다음 실행에 다시)"""
 
 
 def _obj(props: dict) -> dict:
@@ -59,7 +58,7 @@ PICK_SYSTEM = """공연 출연진 이름 하나가 MusicBrainz 에서 같은 이
 
 PICK_SCHEMA = _obj({"id": {"type": "string", "description": "고른 후보의 id · 확실하지 않으면 빈 문자열"}})
 
-# 11/25 소개 글 — 문장마다 근거 출처 번호 (코드가 숫자 · 제목 · 개인정보를 출처와 대조 · describe.py)
+# 소개 글 - 문장마다 근거 출처 번호 (코드가 숫자, 제목, 개인정보를 출처와 대조, describe.py)
 DESCRIBE_SCHEMA = _obj({"sentences": {"type": "array", "items": _obj({
     "text": {"type": "string"},
     "source": {"type": "integer", "description": "이 문장의 근거가 된 sources 의 번호(no)"},
@@ -88,7 +87,7 @@ CONCERT_SCHEMA = _obj({
     "notices": {"type": "array", "items": {"type": "string"}},
 })
 
-# 11/26 굿즈 · 음반 판본 상세 설명 (detail.py) — 공식 판매 페이지의 글 · 이미지에서 사실만
+# 굿즈, 음반 판본 상세 설명 (detail.py) - 공식 판매 페이지의 글, 이미지에서 사실만
 PRODUCT_SCHEMA = _obj({
     "isProductPage": {"type": "boolean", "description": "이 상품을 파는 · 소개하는 페이지인지"},
     "summary": {"type": "string"},
@@ -105,7 +104,7 @@ PRODUCT_SYSTEM = """아티스트 공식 굿즈 또는 음반 판본 하나의 �
 - detailImages: 상세 설명에 쓸 이미지 번호 (상품 사진 · 실측표 · 구성 안내). 로고 · 배너 · 다른 상품 · 아이콘 · 모델 얼굴만 나온 사진은 넣지 않습니다.
 - 페이지 · 이미지에 없는 값을 지어내지 않습니다. 읽히지 않는 글자는 추측하지 않습니다. 개인 정보는 쓰지 않습니다."""
 
-# 11/24 indig 가 다루는 아티스트 — 공연 · 아티스트 판단이 같이 씀 (사람이 읽는 판(서비스 설명)과 이유는 docs/v2_인디_아티스트_기준.md)
+# indig 가 다루는 아티스트 - 공연, 아티스트 판단이 같이 씀 (사람이 읽는 판(서비스 설명)과 이유는 docs/v2_인디_아티스트_기준.md)
 INDIE_RULES = """indig 가 다루는 아티스트:
 - 다룸: 스스로 또는 인디 레이블 · 작은 기획사에서 음악을 만들고 클럽 · 라이브홀 · 소극장 · 인디 페스티벌 무대에 서는 밴드 · 싱어송라이터 · 프로듀서 · 연주자.
   록 · 팝 · 포크 · 일렉트로닉 · 재즈 · R&B 등 장르는 넓게 봅니다. 유명해지거나 큰 무대에 서도 이렇게 활동하면 다룹니다.
@@ -183,9 +182,9 @@ class Llm:
         self.model = model
         self.input_tokens = 0
         self.output_tokens = 0          # 생각 토큰 포함
-        self.stop_reason = "quota"      # exhausted 의 이유: quota · unavailable
-        self._quota = False             # 하루 한도를 다 씀 → 이번 실행의 남은 호출은 건너뜀
-        self._down_until: float | None = None   # 서버가 계속 응답 못 함 → 이 시각(clock)까지 건너뛰고, 지나면 다시 불러 봄
+        self.stop_reason = "quota"      # exhausted 의 이유: quota, unavailable
+        self._quota = False             # 하루 한도를 다 씀 -> 이번 실행의 남은 호출은 건너뜀
+        self._down_until: float | None = None   # 서버가 계속 응답 못 함 -> 이 시각(clock)까지 건너뛰고, 지나면 다시 불러 봄
         self._sleep = sleep
         self._clock = clock
         self._gap = gap
@@ -193,11 +192,11 @@ class Llm:
 
     @property
     def exhausted(self) -> bool:
-        """지금 부르면 안 됨 — 하루 한도(이번 실행 끝까지) · 서버가 계속 응답 못 함(COOLDOWN 동안)"""
+        """지금 부르면 안 됨 - 하루 한도(이번 실행 끝까지), 서버가 계속 응답 못 함(COOLDOWN 동안)"""
         return self._quota or (self._down_until is not None and self._clock() < self._down_until)
 
     def cooldown_left(self) -> float | None:
-        """11/26 쉬는 중이면 남은 초 (0 = 지금 불러도 됨) · 하루 한도면 None (이번 실행에는 다시 못 부름)"""
+        """쉬는 중이면 남은 초 (0 = 지금 불러도 됨), 하루 한도면 None (이번 실행에는 다시 못 부름)"""
         if self._quota:
             return None
         if self._down_until is None:
@@ -208,7 +207,7 @@ class Llm:
         self._sleep(seconds)
 
     def extract(self, system: str, content: str | list, schema: dict) -> dict:
-        """content: 글 또는 [이미지 Part …, 글 Part]"""
+        """content: 글 또는 [이미지 Part ..., 글 Part]"""
         r = self._generate(content, types.GenerateContentConfig(
             system_instruction=system, response_mime_type="application/json", response_json_schema=schema,
             thinking_config=types.ThinkingConfig(thinking_level=THINKING), max_output_tokens=MAX_TOKENS))
@@ -218,7 +217,7 @@ class Llm:
             raise LlmSkip("bad_json") from None
 
     def research(self, system: str, content: str, tools: list, turns: int = TURNS) -> str:
-        """함수 호출 반복 — tools: [(선언 {name, description, parameters(JSON 스키마)}, 함수(**인자) → dict)].
+        """함수 호출 반복 - tools: [(선언 {name, description, parameters(JSON 스키마)}, 함수(**인자) -> dict)].
         모델이 더 부르지 않으면 마지막 글을 돌려줍니다. 함수가 LlmSkip 을 내면 조사를 멈춥니다 (예: 검색 한도 소진)."""
         run = {d["name"]: fn for d, fn in tools}
         config = types.GenerateContentConfig(
@@ -242,7 +241,7 @@ class Llm:
         if self.exhausted:
             raise LlmSkip(self.stop_reason)
         waits = SERVER_WAITS[:1] if self._down_until is not None else SERVER_WAITS   # 쉬고 난 뒤 다시 불러 볼 때는 1분만 더
-        limited = busy = 0                             # 분당 한도 · 서버 오류로 다시 부른 횟수
+        limited = busy = 0                             # 분당 한도, 서버 오류로 다시 부른 횟수
         while True:
             self._wait()
             try:
@@ -267,10 +266,10 @@ class Llm:
                     self._down_until, self.stop_reason = self._clock() + COOLDOWN, "unavailable"
                     log.warning("llm_unavailable model=%s retry_in=%ss error=%s", self.model, COOLDOWN, str(e)[:300])
                     raise LlmSkip("unavailable") from None
-                if e.code == 400:                      # 그 요청만 문제 (이미지 · 글) — 실행 전체를 멈추지 않음
+                if e.code == 400:                      # 그 요청만 문제 (이미지, 글) - 실행 전체를 멈추지 않음
                     log.warning("llm_rejected model=%s error=%s", self.model, str(e)[:300])
                     raise LlmSkip("rejected") from None
-                raise                                  # 401 · 403 등 설정 문제 — 실행을 멈추고 기록
+                raise                                  # 401, 403 등 설정 문제 - 실행을 멈추고 기록
             if self._down_until is not None:
                 log.info("llm_available_again model=%s", self.model)
                 self._down_until = None
@@ -278,7 +277,7 @@ class Llm:
             if r.prompt_feedback is not None and r.prompt_feedback.block_reason:
                 raise LlmSkip("blocked")
             reason = r.candidates[0].finish_reason if r.candidates else None
-            if reason != types.FinishReason.STOP:       # MAX_TOKENS · SAFETY · RECITATION …
+            if reason != types.FinishReason.STOP:       # MAX_TOKENS, SAFETY, RECITATION ...
                 raise LlmSkip((reason.name if reason else "no_candidate").lower())
             return r
 
@@ -298,9 +297,9 @@ class Llm:
 
     def artist_info(self, name: str, aliases: list[str], albums: list[str], label: str | None,
                     legal_names: list[str] = (), web: list[str] = ()) -> dict:
-        """{relevance(INDIE · MAINSTREAM), genres, korean_name} — 한글 활동명은 근거에 있을 때만 (아니면 None): 한글이 들어 있고 본명이 아니며(본명으로 활동하면 본명도),
-        별칭 중 하나이거나 웹 검색 결과 한 건(제목 · 본문 조각)에 영어 이름과 함께 보여야 함
-        (11/24 근거 없이 물으니 Royal 44 → '로열포티포' 를 지어냄 · 실제 표기는 로얄44)"""
+        """{relevance(INDIE, MAINSTREAM), genres, korean_name} - 한글 활동명은 근거에 있을 때만 (아니면 None): 한글이 들어 있고 본명이 아니며(본명으로 활동하면 본명도),
+        별칭 중 하나이거나 웹 검색 결과 한 건(제목, 본문 조각)에 영어 이름과 함께 보여야 함
+        (근거 없이 물으니 Royal 44 -> '로열포티포' 를 지어냄, 실제 표기는 로얄44)"""
         payload = {"name": name, "aliases": aliases, "legalNames": list(legal_names), "albums": albums[:15], "label": label}
         if web:
             payload["webResults"] = list(web)
@@ -315,7 +314,7 @@ class Llm:
         k = norm(korean)
         legal = {norm(n) for n in legal_names}
         if norm(name) in legal:
-            legal = set()                     # 본명으로 활동 (Moon Sujin → 문수진)
+            legal = set()                     # 본명으로 활동 (Moon Sujin -> 문수진)
         seen = k in {norm(a) for a in aliases} or any(k in norm(w) and norm(name) in norm(w) for w in web)
         if not HANGUL.search(korean) or k in legal or not seen:
             korean = None
@@ -323,20 +322,19 @@ class Llm:
         return {"relevance": relevance, "genres": genres[:3], "korean_name": korean}
 
     def describe(self, system: str, subject: dict, sources: list[dict]) -> list[dict]:
-        """11/25 소개 글 — [{text, source}] 그대로 (검사는 describe.checked). subject: {artist: …} 또는 {album: …} ·
-        sources: [{no, site, title, text}]"""
+        """소개 글 - [{text, source}] 그대로 (검사는 describe.checked). subject: {artist: ...} 또는 {album: ...}, sources: [{no, site, title, text}]"""
         content = json.dumps({**subject, "sources": sources}, ensure_ascii=False)
         result = self.extract(system, content, DESCRIBE_SCHEMA)
         return [s for s in result.get("sentences") or [] if isinstance(s, dict)]
 
     def pick_artist(self, name: str, candidates: list[dict], concert: dict) -> str | None:
-        """11/24 같은 이름의 한국 아티스트 여럿 중 이 공연에 나오는 사람 — 확실할 때만 id (아니면 None)"""
+        """같은 이름의 한국 아티스트 여럿 중 이 공연에 나오는 사람 - 확실할 때만 id (아니면 None)"""
         content = json.dumps({"name": name, "concert": concert, "candidates": candidates}, ensure_ascii=False)
         picked = str(self.extract(PICK_SYSTEM, content, PICK_SCHEMA).get("id") or "").strip()
         return picked if picked in {c["id"] for c in candidates} else None
 
     def concert(self, facts: dict, images: list[bytes] | None = None) -> dict:
-        """facts: {detail, venue, knownArtists} · images: JPEG 조각 (포스터 → 소개 이미지 순, images.slices)"""
+        """facts: {detail, venue, knownArtists}, images: JPEG 조각 (포스터 -> 소개 이미지 순, images.slices)"""
         text = json.dumps(facts, ensure_ascii=False)
         if not images:
             return self.extract(CONCERT_SYSTEM, text, CONCERT_SCHEMA)
@@ -345,7 +343,7 @@ class Llm:
 
 
     def product_detail(self, product: dict, page: str, images: list[list[bytes]]) -> dict:
-        """11/26 product: {name, kind, artist} · page: 페이지 글 · images: 이미지마다 JPEG 조각 (images.slices) — 번호는 1부터"""
+        """product: {name, kind, artist}, page: 페이지 글, images: 이미지마다 JPEG 조각 (images.slices) - 번호는 1부터"""
         parts = []
         for n, chunks in enumerate(images, start=1):
             parts.append(types.Part.from_text(text=f"이미지 {n}"))
@@ -355,7 +353,7 @@ class Llm:
 
 
 def _call(run: dict, call) -> dict:
-    """모델이 부른 함수 실행 — 모르는 함수 · 잘못된 인자는 오류를 모델에게 돌려줌 (LlmSkip 은 위로)"""
+    """모델이 부른 함수 실행 - 모르는 함수, 잘못된 인자는 오류를 모델에게 돌려줌 (LlmSkip 은 위로)"""
     fn = run.get(call.name)
     if fn is None:
         return {"error": f"없는 도구: {call.name}"}
@@ -366,6 +364,6 @@ def _call(run: dict, call) -> dict:
 
 
 def _retry_after(e) -> float | None:
-    """429 오류의 retryDelay ('23s') — 없으면 None"""
+    """429 오류의 retryDelay ('23s') - 없으면 None"""
     m = re.search(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s", str(e))
     return float(m.group(1)) + 1 if m else None

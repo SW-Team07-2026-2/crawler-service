@@ -9,7 +9,7 @@ from crawler.webtools import SearchQuota
 
 
 class ScriptedLlm:
-    """모델 대신 — research 는 script 의 도구 호출을 차례로 실행하고 마지막 글을 돌려줌 · extract 는 정해 둔 JSON"""
+    """모델 대신 - research 는 script 의 도구 호출을 차례로 실행하고 마지막 글을 돌려줌, extract 는 정해 둔 JSON"""
 
     def __init__(self, script, extracted=None):
         self.script, self.extracted = script, extracted or {}
@@ -74,7 +74,7 @@ def test_releases_keep_only_items_whose_source_was_searched_and_shows_the_title(
                       "reference_price": 45000, "source_urls": [SHOP]},
                      {"format": "CD", "name": "CD", "released_at": "", "pre_order": False, "vinyl_color": "UNKNOWN",
                       "reference_price": -1, "source_urls": ["https://made.up/cd"]}]},            # 검색 결과에 없는 주소
-        {"title": "새 미니 앨범", "type": "EP", "released_at": "", "source_urls": [OTHER], "formats": []},   # 조사 글에 [출처] 로 안 적힘 · 안 엶
+        {"title": "새 미니 앨범", "type": "EP", "released_at": "", "source_urls": [OTHER], "formats": []},   # 조사 글에 [출처] 로 안 적힘, 안 엶
         {"title": "Kyo181", "type": "ALBUM", "released_at": "2020-01-01", "source_urls": [LABEL], "formats": []},  # 출처에 제목이 없음
     ]}
     llm = ScriptedLlm([("web_search", {"query": "실리카겔 신보"}),
@@ -107,9 +107,9 @@ def test_open_page_only_for_search_results_and_page_text_checks_title_and_price(
          "formats": [{"format": "LP", "name": "2LP 투명 컬러", "released_at": "", "pre_order": True, "vinyl_color": "COLOR",
                       "reference_price": 52000, "source_urls": [store]},
                      {"format": "CASSETTE", "name": "카세트", "released_at": "", "pre_order": False, "vinyl_color": "UNKNOWN",
-                      "reference_price": 19000, "source_urls": [store]},     # 출처에 없는 가격 → 참고 가격 비움
+                      "reference_price": 19000, "source_urls": [store]},     # 출처에 없는 가격 -> 참고 가격 비움
                      {"format": "CD", "name": "CD", "released_at": "2026-11-24", "pre_order": True, "vinyl_color": "UNKNOWN",
-                      "reference_price": -1, "source_urls": [other]}]},      # 다른 앨범 상품 페이지 → 판본으로 안 붙임
+                      "reference_price": -1, "source_urls": [other]}]},      # 다른 앨범 상품 페이지 -> 판본으로 안 붙임
         {"title": "Kyo181", "type": "ALBUM", "released_at": "", "source_urls": [store], "formats": []},   # 본문에 없는 제목
     ]}
     llm = ScriptedLlm([("web_search", {"query": "q"}), ("open_page", {"url": store}), ("open_page", {"url": other}),
@@ -149,8 +149,8 @@ def test_search_credits_running_out_stops_the_research():
     with pytest.raises(LlmSkip, match="search_quota"):
         ws.releases(ARTIST)
     assert not ws.exhausted
-    tavily.exhausted = True                                        # 진짜 Tavily 는 한도 · 432 에서 스스로 표시
-    assert ws.exhausted                                            # → 파이프라인이 남은 조사를 다음 실행으로
+    tavily.exhausted = True                                        # 진짜 Tavily 는 한도, 432 에서 스스로 표시
+    assert ws.exhausted                                            # -> 파이프라인이 남은 조사를 다음 실행으로
 
 
 def test_goods_purchase_url_only_when_it_was_a_search_result():
@@ -210,4 +210,4 @@ def test_search_opens_every_result_page_once_and_needs_a_citation():
     assert [(r["opened"], r["content"]) for r in first] == [(True, page[:3000]), (True, "새 미니 앨범을 낸다는 소문")]   # 조각 대신 본문
     assert pages.opened == [store, blog]                                            # 두 번 나와도 한 번만 엶
     assert llm.tool_results[2] == {"url": store, "content": page[:15000]}            # 더 긴 본문은 open_page 로
-    assert [r["title"] for r in found] == ["POWER ANDRE 99"]                        # 블로그는 [출처] 로 안 적힘 → 버림
+    assert [r["title"] for r in found] == ["POWER ANDRE 99"]                        # 블로그는 [출처] 로 안 적힘 -> 버림

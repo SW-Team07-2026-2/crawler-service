@@ -1,10 +1,10 @@
-"""인디스트릿(indistreet.com) 최근 발매 앨범 — 페이지에 들어 있는 목록 데이터(발매일 순 최근 40개)에서 사실만 씁니다.
+"""인디스트릿(indistreet.com) 최근 발매 앨범 - 페이지에 들어 있는 목록 데이터(발매일 순 최근 40개)에서 사실만 씁니다.
 
-11/18 확인:
-- robots.txt 는 일반 수집기(*)에 /albums 를 허용하고 /api/ 는 막습니다 → 페이지만 봅니다. 쪽 넘김(?page=)은 페이지가 무시하고
+확인:
+- robots.txt 는 일반 수집기(*)에 /albums 를 허용하고 /api/ 는 막습니다 -> 페이지만 봅니다. 쪽 넘김(?page=)은 페이지가 무시하고
   다음 쪽은 막힌 /api/ 라 최근 40개만 봅니다 (한 달 5개 안팎이라 하루 한 번이면 새 발매는 놓치지 않음).
-- AI 수집 로봇(ClaudeBot · GPTBot 등)은 사이트 전체를 막아 두었습니다 → 이 데이터는 AI 모델(Gemini)에 넣지 않습니다 (전처리 없이 씀).
-- 약관상 글 · 이미지 저작권은 올린 회원에게 있습니다 → 소개 글 · 표지는 가져오지 않고 제목 · 종류 · 발매일 · 아티스트 이름만.
+- AI 수집 로봇(ClaudeBot, GPTBot 등)은 사이트 전체를 막아 두었습니다 -> 이 데이터는 AI 모델(Gemini)에 넣지 않습니다 (전처리 없이 씀).
+- 약관상 글, 이미지 저작권은 올린 회원에게 있습니다 -> 소개 글, 표지는 가져오지 않고 제목, 종류, 발매일, 아티스트 이름만.
 """
 import json
 import re
@@ -18,7 +18,7 @@ _PUSH = re.compile(r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)')
 
 
 def latest(http) -> list[dict]:
-    """[{id, title, titles, type, released_at, url, artists: [[이름들], …]}] — 아티스트 이름은 한글 · 영어 · 표시 이름 순"""
+    """[{id, title, titles, type, released_at, url, artists: [[이름들], ...]}] - 아티스트 이름은 한글, 영어, 표시 이름 순"""
     out = []
     for a in _albums(http.get("indistreet", URL, max_age=timedelta(hours=12))):
         type_, title = TYPES.get(a.get("type")), (a.get("defaultName") or "").strip()
