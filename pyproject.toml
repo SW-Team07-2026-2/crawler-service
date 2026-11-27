@@ -11,6 +11,7 @@ dependencies = [
     "PyJWT==2.15.1",
     "APScheduler==3.11.3",
     "Pillow==11.3.0",          # 공연 포스터 · 소개 이미지를 모델이 읽게 줄이고 자름 (11/18)
+    "holidays==0.108",         # KOPIS 시간 안내의 HOL 을 한국 공휴일로 읽음
     "tzdata==2026.6",          # 슬림 이미지에도 Asia/Seoul 이 있게
 ]
 
