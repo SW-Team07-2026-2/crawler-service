@@ -31,7 +31,7 @@ def test_robots_blocks_disallowed_paths_and_is_read_once(sessions):
 
 
 def test_musicbrainz_api_follows_api_policy_not_robots(sessions):
-    """MusicBrainz robots.txt 는 /ws 를 막지만 API 이용 정책이 허락 — robots 를 읽지 않고 1.5초 간격으로 부름"""
+    """MusicBrainz robots.txt 는 /ws 를 막지만 API 이용 정책이 허락 - robots 를 읽지 않고 1.5초 간격으로 부름"""
     web = FakeWeb([("/robots.txt", 200, "User-agent: *\nDisallow: /ws\n"), ("/ws/2/", 200, "{}")])
     waits = []
     http = make_http(sessions, web)
@@ -82,7 +82,7 @@ def test_failure_log_label_is_not_mistaken_for_a_secret():
 
 
 def test_kopis_errors_are_retried_later_but_other_sites_are_not(sessions):
-    """11/19 KOPIS 가 400 을 주다가 곧 200 — KOPIS 만 30 · 60초 쉬었다가 다시 (그래도 안 되면 그 항목만 실패)"""
+    """KOPIS 가 400 을 주다가 곧 200 - KOPIS 만 30, 60초 쉬었다가 다시 (그래도 안 되면 그 항목만 실패)"""
     from crawler.http import Http
     from conftest import UA
     answers = {"www.kopis.or.kr": iter([(400, "<html>Bad Request</html>"), (200, "<dbs/>")]),
@@ -98,12 +98,12 @@ def test_kopis_errors_are_retried_later_but_other_sites_are_not(sessions):
     images = iter([(500, b""), (502, b""), (503, b"")])
     sleeps.clear()
     with pytest.raises(RuntimeError, match="503"):
-        http.get_bytes("kopis", "https://www.kopis.or.kr/upload/pfmPoster/PF1.gif")   # 30 · 60초 뒤에도 실패 → 그 이미지만
+        http.get_bytes("kopis", "https://www.kopis.or.kr/upload/pfmPoster/PF1.gif")   # 30, 60초 뒤에도 실패 -> 그 이미지만
     assert [s for s in sleeps if s >= 30] == [30, 60]
 
 
 def test_kopis_requests_are_spaced_five_seconds_apart(sessions):
-    """11/20~22 KOPIS 가 1초 간격 연속 요청을 수시로 막음 → KOPIS 만 3초 간격 · 11/25 3초에도 막혀 5초"""
+    """~22 KOPIS 가 1초 간격 연속 요청을 수시로 막음 -> KOPIS 만 3초 간격, 3초에도 막혀 5초"""
     from crawler.http import Http
     from conftest import UA
     sleeps = []

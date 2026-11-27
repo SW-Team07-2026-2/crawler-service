@@ -1,4 +1,4 @@
-"""Catalog · Concert 의 정해진 값 (catalog-service · concert-service develop 기준 11/17). 목록 밖 값을 보내면 Catalog 가 항목을 거절합니다."""
+"""Catalog, Concert 의 정해진 값 (catalog-service, concert-service develop 기준 ). 목록 밖 값을 보내면 Catalog 가 항목을 거절합니다."""
 
 GENRES = [
     "INDIE_ROCK", "ALTERNATIVE", "GARAGE", "PUNK", "HARDCORE", "EMO", "METAL", "POST_ROCK", "SHOEGAZE", "PSYCHEDELIC",
@@ -14,5 +14,5 @@ REGIONS = [
 CONCERT_TYPES = ["SOLO", "FESTIVAL"]
 GOODS_CATEGORIES = ["TSHIRT", "OUTER", "KEYRING", "PICK", "MUFFLER", "SCARF", "BAG", "HAT", "ETC"]
 OPTION_SIZES = ["XS", "S", "M", "L", "XL", "XXL", "FREE"]
-ARTIST_GENDERS = ["MALE", "FEMALE", "MIXED"]     # 11/22 catalog ArtistGender · 목록 밖 값은 승인 때 400
-ARTIST_COMPOSITIONS = ["SOLO", "GROUP"]          # 11/22 catalog ArtistComposition
+ARTIST_GENDERS = ["MALE", "FEMALE", "MIXED"]     # catalog ArtistGender, 목록 밖 값은 승인 때 400
+ARTIST_COMPOSITIONS = ["SOLO", "GROUP"]          # catalog ArtistComposition

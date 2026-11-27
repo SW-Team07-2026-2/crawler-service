@@ -1,4 +1,4 @@
-"""11/25 소개 글 — 아티스트 bio · 앨범 description (한국어 위키백과 → 웹 검색 → 없으면 빈칸)"""
+"""소개 글 - 아티스트 bio, 앨범 description (한국어 위키백과 -> 웹 검색 -> 없으면 빈칸)"""
 import json
 from datetime import timedelta
 
@@ -37,9 +37,9 @@ ARTICLE = """실리카겔(Silica Gel)은 대한민국의 4인조 록 밴드이�
 WIKI_URL = "https://ko.wikipedia.org/wiki/%EC%8B%A4%EB%A6%AC%EC%B9%B4%EA%B2%94_%28%EB%B0%B4%EB%93%9C%29"
 BIO = [
     {"text": "실리카겔은 2015년 결성한 4인조 록 밴드입니다.", "source": 1},
-    {"text": "멤버 김한주는 서울에서 태어났습니다.", "source": 1},              # 개인정보 — 뺌
+    {"text": "멤버 김한주는 서울에서 태어났습니다.", "source": 1},              # 개인정보 - 뺌
     {"text": "2016년 첫 정규 앨범 《Kyo181》을 냈습니다.", "source": 1},
-    {"text": "2019년 그래미상을 받았습니다.", "source": 1},                    # 출처에 없는 숫자 — 뺌
+    {"text": "2019년 그래미상을 받았습니다.", "source": 1},                    # 출처에 없는 숫자 - 뺌
     {"text": "2018년 한국대중음악상 올해의 신인상을 받았습니다.", "source": 1},
 ]
 ALBUM = [
@@ -86,7 +86,7 @@ def test_artist_and_album_get_a_checked_korean_description_from_korean_wikipedia
                              "2018년 한국대중음악상 올해의 신인상을 받았습니다.")
     [ev] = [e for e in artist["evidence"] if e["for"] == "bio"]
     assert (ev["site"], ev["url"], ev["title"]) == ("wikipedia", WIKI_URL, "실리카겔 (밴드)")
-    # 위키백과 출처로 넘긴 본문 — 데뷔 이전 · 그 아래 학창 시절 · 각주 단락은 빠지고, 내용 없는 소제목도 빠짐
+    # 위키백과 출처로 넘긴 본문 - 데뷔 이전, 그 아래 학창 시절, 각주 단락은 빠지고, 내용 없는 소제목도 빠짐
     [(_, sources)] = [d for d in llm.described if d[0] == "Silica Gel"]
     assert "태어났다" not in sources[0]["text"] and "고등학교" not in sources[0]["text"] and "음반 목록" not in sources[0]["text"]
     assert "[활동]" in sources[0]["text"]
@@ -97,7 +97,7 @@ def test_artist_and_album_get_a_checked_korean_description_from_korean_wikipedia
     [(_, album_sources)] = [d for d in llm.described if d[0] == "Kyo181"]
     assert album_sources[1]["text"] == "2016년 정규 1집 《Kyo181》을 발매했다."      # 《제목》 으로 적은 문장만
 
-    # 위키백과 연결이 없는 팀(검정치마 · 웹 검색 키 없음) — Gemini 를 부르지 않고 빈칸 (관리자가 씀)
+    # 위키백과 연결이 없는 팀(검정치마, 웹 검색 키 없음) - Gemini 를 부르지 않고 빈칸 (관리자가 씀)
     bs, _ = payload_of(sessions, "ARTIST", "검정치마")
     assert "bio" not in bs and "describe:검정치마" not in llm.calls
     rows = described(sessions)
@@ -107,7 +107,7 @@ def test_artist_and_album_get_a_checked_korean_description_from_korean_wikipedia
     [sent] = [i for path, body in studio.posts if path.endswith("/artists") for i in body["items"] if i["name"] == "Silica Gel"]
     assert sent["bio"] == artist["bio"]
 
-    # 다음 실행 — 다시 쓰지 않고, 다시 보기로 후보를 새로 만들어도 소개 글이 그대로라 다시 보내지 않음
+    # 다음 실행 - 다시 쓰지 않고, 다시 보기로 후보를 새로 만들어도 소개 글이 그대로라 다시 보내지 않음
     calls, posts = len(llm.described), len(studio.posts)
     runner.run("dawn", sessions, pipeline(sessions, w, studio, llm), ["실리카겔", "검정치마"])
     assert len(llm.described) == calls
@@ -125,13 +125,13 @@ def test_lunch_run_writes_descriptions_left_by_the_evening_run(sessions, monkeyp
     out = runner.run("lunch", sessions, pipeline(sessions, w, studio, llm), [])
     assert out["stats"]["describe_artist_written"] == 1
     artist, item = payload_of(sessions, "ARTIST", "Silica Gel")
-    assert artist["bio"].startswith("실리카겔은 2015년") and item.status == "SENT"     # 바뀐 후보 → 점심에 바로 보냄
+    assert artist["bio"].startswith("실리카겔은 2015년") and item.status == "SENT"     # 바뀐 후보 -> 점심에 바로 보냄
 
 
 def test_too_few_sentences_leave_it_blank_with_the_sources_for_the_admin_and_try_again_after_30_days(sessions):
     w, studio = wiki_web(), FakeStudio()
     llm = describing_llm()
-    llm.describes["Silica Gel"] = BIO[:2]                     # 남는 문장이 하나 — 2문장 미만이면 빈칸
+    llm.describes["Silica Gel"] = BIO[:2]                     # 남는 문장이 하나 - 2문장 미만이면 빈칸
     runner.run("dawn", sessions, pipeline(sessions, w, studio, llm), ["실리카겔"])
     artist, item = payload_of(sessions, "ARTIST", "Silica Gel")
     assert "bio" not in artist
@@ -159,7 +159,7 @@ def test_artist_without_korean_wikipedia_uses_one_web_search_within_the_run_shar
     p = pipeline(sessions, wiki_web(), FakeStudio(), llm)
     p.searcher = searcher
     monkeypatch.setattr(pipeline_module, "WEB_ARTISTS_PER_RUN", 0)
-    p._web_left = 0                                           # 신보 · 굿즈 웹 조사는 이 시험과 상관없음
+    p._web_left = 0                                           # 신보, 굿즈 웹 조사는 이 시험과 상관없음
     runner.run("dawn", sessions, p, ["검정치마"])
     bs, _ = payload_of(sessions, "ARTIST", "검정치마")
     assert bs["bio"] == "검정치마는 2008년 정규 1집 《201》로 데뷔한 1인 프로젝트입니다. 2011년 한국대중음악상을 받았습니다."
@@ -191,10 +191,10 @@ def test_checked_keeps_only_sentences_backed_by_their_source():
     text, used = desc.checked(raw, sources, max_sentences=4, max_chars=300, min_sentences=2,
                               banned_names=desc.legal_names(s["text"] for s in sources))
     assert text == "2022년 싱글 〈입춘〉으로 데뷔했습니다. 4곡이 실렸습니다." and used == {0, 1}
-    # 앨범 — MusicBrainz 값(0번)만으로 쓴 글은 빈칸
+    # 앨범 - MusicBrainz 값(0번)만으로 쓴 글은 빈칸
     assert desc.checked([{"text": "2020년에 냈습니다.", "source": 0}, {"text": "4곡이 실렸습니다.", "source": 0}], sources,
                         max_sentences=3, max_chars=200, min_sentences=2, facts_no=0) == (None, set())
-    # 길이 — 넘치는 문장부터 버림
+    # 길이 - 넘치는 문장부터 버림
     long = [{"text": "가" * 150 + "입니다.", "source": 1}, {"text": "나" * 150 + "입니다.", "source": 1}]
     assert desc.checked(long, sources, max_sentences=4, max_chars=300, min_sentences=2) == (None, set())
 

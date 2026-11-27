@@ -25,7 +25,7 @@ def quota_error(quota_id, delay="23s"):
 
 
 def test_schemas_fit_structured_output_limits():
-    """모든 필드 필수(선택 0개) · union 없음 · additionalProperties false — 구조화 출력 제약 안"""
+    """모든 필드 필수(선택 0개), union 없음, additionalProperties false - 구조화 출력 제약 안"""
     for schema in (ARTIST_SCHEMA, CONCERT_SCHEMA):
         assert schema["additionalProperties"] is False
         assert set(schema["required"]) == set(schema["properties"])
@@ -46,7 +46,7 @@ def test_artist_info_request_and_cleanup():
 
 
 def test_artist_korean_name_is_kept_only_when_it_is_hangul_and_not_the_legal_name():
-    """11/23 영어 이름은 한글 활동명으로 — 본명(윤진영) · 영어 그대로 · 빈 값은 None (MusicBrainz 이름을 그대로 씀)"""
+    """영어 이름은 한글 활동명으로 - 본명(윤진영), 영어 그대로, 빈 값은 None (MusicBrainz 이름을 그대로 씀)"""
     web = ["Royal 44(로얄44) - I Been Freestyle | Royal44 #로얄44 ENA 음악차트쇼"]
     ok = llm_with(response('{"genres": ["HIPHOP"], "koreanName": " 로얄44 "}'))
     assert ok.artist_info("Royal 44", [], [], None, web=web) == {"relevance": "INDIE", "genres": ["HIPHOP"], "korean_name": "로얄44"}
@@ -59,7 +59,7 @@ def test_artist_korean_name_is_kept_only_when_it_is_hangul_and_not_the_legal_nam
 
 
 def test_artist_relevance_is_mainstream_only_when_the_model_says_so():
-    """11/24 대중 쪽 아티스트 판단 — MAINSTREAM 만 그대로 · 대소문자 무시 · 그 밖(빠짐 · 이상한 값)은 INDIE (모르는 팀은 다룸)"""
+    """대중 쪽 아티스트 판단 - MAINSTREAM 만 그대로, 대소문자 무시, 그 밖(빠짐, 이상한 값)은 INDIE (모르는 팀은 다룸)"""
     for answer, expected in (("MAINSTREAM", "MAINSTREAM"), ("mainstream", "MAINSTREAM"), ("INDIE", "INDIE"), ("", "INDIE")):
         llm = llm_with(response(json.dumps({"relevance": answer, "genres": [], "koreanName": ""})))
         assert llm.artist_info("김종국", [], ["Edition"], None)["relevance"] == expected
@@ -68,7 +68,7 @@ def test_artist_relevance_is_mainstream_only_when_the_model_says_so():
 
 
 def test_artist_korean_name_must_be_an_alias_or_appear_next_to_the_name_in_a_search_result():
-    """11/24 근거 없이 물으니 Royal 44 → '로열포티포' 를 지어냄 — 별칭이거나, 검색 결과 한 건에 영어 이름과 함께 보일 때만"""
+    """근거 없이 물으니 Royal 44 -> '로열포티포' 를 지어냄 - 별칭이거나, 검색 결과 한 건에 영어 이름과 함께 보일 때만"""
     def ask(name, answer, aliases=(), web=()):
         return llm_with(response(json.dumps({"genres": [], "koreanName": answer}))).artist_info(
             name, list(aliases), [], None, web=list(web))["korean_name"]
@@ -119,20 +119,20 @@ def test_minute_limit_waits_retry_delay_then_daily_limit_stops_the_rest_of_the_r
 
 
 def test_server_error_that_keeps_coming_stops_the_rest_of_the_run_not_the_stage():
-    """11/19 503 "high demand" 가 20분 이어져 공연 단계 전체가 멈췄음 → 이유 unavailable 로 남은 호출만 건너뜀"""
+    """503 "high demand" 가 20분 이어져 공연 단계 전체가 멈췄음 -> 이유 unavailable 로 남은 호출만 건너뜀"""
     busy = lambda: errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
     sleeps = []
     llm = llm_with(*[busy() for _ in range(5)], sleeps=sleeps)
     with pytest.raises(LlmSkip, match="unavailable"):
         llm.concert({"detail": {"mt20id": "PF1"}})
-    assert sleeps == [60, 120, 240, 480] and llm.exhausted and llm.stop_reason == "unavailable"   # 1 · 2 · 4 · 8분 기다린 뒤에야
+    assert sleeps == [60, 120, 240, 480] and llm.exhausted and llm.stop_reason == "unavailable"   # 1, 2, 4, 8분 기다린 뒤에야
     with pytest.raises(LlmSkip, match="unavailable"):              # 남은 호출은 API 를 부르지 않음
         llm.artist_info("A", [], [], None)
     assert len(llm.client.models.requests) == 5
 
 
 def test_server_error_that_keeps_coming_pauses_calls_for_a_while_then_tries_again():
-    """11/24 · 11/25 새벽 503 한 번에 실행 끝까지 Gemini 를 안 불러 아티스트 168팀을 못 물었음 → 20분 쉬고 다시 불러 봄"""
+    """, 새벽 503 한 번에 실행 끝까지 Gemini 를 안 불러 아티스트 168팀을 못 물었음 -> 20분 쉬고 다시 불러 봄"""
     busy = lambda: errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
     now, sleeps = [0.0], []
     llm = Llm(None, "m", client=fake_client(*[busy() for _ in range(7)], response('{"genres": ["EMO"]}')),
@@ -147,7 +147,7 @@ def test_server_error_that_keeps_coming_pauses_calls_for_a_while_then_tries_agai
     assert len(requests) == 5
     now[0] = 1200
     assert not llm.exhausted
-    with pytest.raises(LlmSkip, match="unavailable"):              # 다시 불러 봄 — 1분 쉬고 한 번 더 · 그래도 안 되면 또 20분
+    with pytest.raises(LlmSkip, match="unavailable"):              # 다시 불러 봄 - 1분 쉬고 한 번 더, 그래도 안 되면 또 20분
         llm.artist_info("A", [], [], None)
     assert sleeps[4:] == [60] and len(requests) == 7 and llm.exhausted
     now[0] = 2400
@@ -210,7 +210,7 @@ def test_research_gives_up_after_too_many_turns_and_tool_skip_stops_it():
 
 
 def serve(statuses):
-    """statuses 순서대로 응답하는 작은 HTTP 서버 — 받은 요청은 seen 에"""
+    """statuses 순서대로 응답하는 작은 HTTP 서버 - 받은 요청은 seen 에"""
     seen = []
 
     class H(BaseHTTPRequestHandler):
@@ -258,7 +258,7 @@ def test_studio_needs_crawler_secret():
 
 
 def test_cooldown_left_tells_how_long_to_wait_and_none_on_daily_quota():
-    """11/26 쉬는 중이면 남은 초 · 지금 불러도 되면 0 · 하루 한도면 None (실행 안에서 기다려도 소용없음)"""
+    """쉬는 중이면 남은 초, 지금 불러도 되면 0, 하루 한도면 None (실행 안에서 기다려도 소용없음)"""
     busy = lambda: errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
     now, sleeps = [0.0], []
     llm = Llm(None, "m", client=fake_client(*[busy() for _ in range(5)]), sleep=sleeps.append, gap=0, clock=lambda: now[0])

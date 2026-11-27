@@ -1,4 +1,4 @@
-# Gemini 판단과 상관없이 indig 가 다루는 아티스트 — MusicBrainz id 한 줄에 하나 (# 뒤는 주석 · 이름은 확인용)
-# 대중(MAINSTREAM) · 힙합(HIPHOP)으로 빼지 않습니다. 장르 · 한글 이름은 그대로 Gemini 가 정합니다.
+# Gemini 판단과 상관없이 indig 가 다루는 아티스트 - MusicBrainz id 한 줄에 하나 (# 뒤는 주석, 이름은 확인용)
+# 대중(MAINSTREAM), 힙합(HIPHOP)으로 빼지 않습니다. 장르, 한글 이름은 그대로 Gemini 가 정합니다.
 # 바꾸면 크롤러를 다시 배포해야 반영됩니다 (이미지에 들어감).
 86bfda70-ad8c-4db4-9041-e4843d918269  # QWER — 11/24 사용자 결정 (밴드 활동)
