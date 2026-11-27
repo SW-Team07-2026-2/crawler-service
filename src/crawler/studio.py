@@ -1,7 +1,7 @@
-"""Studio 로 보내기 (docs/v2_크롤러_전송_계약.md) — 같은 compose 의 http://studio:8085/internal/crawl/**.
+"""Studio 로 보내기 (docs/v2_크롤러_전송_계약.md) - 같은 compose 의 http://studio:8085/internal/crawl/**.
 
-토큰: HS256 { iss: crawler, aud: studio, exp: 지금+5분 } · 키 crawler.shared-secret.
-400 은 본문이 틀린 것이라 다시 보내지 않고, 502 · 503 · 연결 실패만 쉬었다가 다시 보냅니다 (같은 본문은 멱등).
+토큰: HS256 { iss: crawler, aud: studio, exp: 지금+5분 }, 키 crawler.shared-secret.
+400 은 본문이 틀린 것이라 다시 보내지 않고, 502, 503, 연결 실패만 쉬었다가 다시 보냅니다 (같은 본문은 멱등).
 """
 import json
 import time

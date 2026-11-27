@@ -1,6 +1,6 @@
-"""공연 포스터 · 소개 이미지를 Gemini 가 읽을 수 있게 — 너비를 줄이고 긴 이미지는 위에서부터 잘라 JPEG 로.
+"""공연 포스터, 소개 이미지를 Gemini 가 읽을 수 있게 - 너비를 줄이고 긴 이미지는 위에서부터 잘라 JPEG 로.
 
-KOPIS 소개 이미지는 세로로 아주 긴 경우가 많고(예매 일정 · 출연진 · 공지가 다 들어 있음), API 는 한 변 8000px 이 넘는 이미지를 받지 않습니다.
+KOPIS 소개 이미지는 세로로 아주 긴 경우가 많고(예매 일정, 출연진, 공지가 다 들어 있음), API 는 한 변 8000px 이 넘는 이미지를 받지 않습니다.
 """
 import io
 
@@ -12,7 +12,7 @@ MAX_SLICES = 24       # 공연 한 건에 보낼 조각 상한 (API 는 요청�
 
 
 def slices(data: bytes, width: int = WIDTH, height: int = HEIGHT, limit: int = MAX_SLICES) -> list[bytes]:
-    """이미지 바이트 → JPEG 조각들 (위에서부터). 이미지가 아니면 ValueError"""
+    """이미지 바이트 -> JPEG 조각들 (위에서부터). 이미지가 아니면 ValueError"""
     try:
         img = Image.open(io.BytesIO(data))
         img.load()
@@ -34,7 +34,7 @@ def slices(data: bytes, width: int = WIDTH, height: int = HEIGHT, limit: int = M
 
 
 def size(data: bytes) -> tuple[int, int]:
-    """11/26 (너비, 높이) — 이미지가 아니면 ValueError (상세 이미지 고르기: 아이콘 · 작은 썸네일 빼기)"""
+    """(너비, 높이) - 이미지가 아니면 ValueError (상세 이미지 고르기: 아이콘, 작은 썸네일 빼기)"""
     try:
         img = Image.open(io.BytesIO(data))
         return img.width, img.height

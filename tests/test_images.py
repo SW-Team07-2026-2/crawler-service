@@ -17,7 +17,7 @@ def picture(width, height, fmt="PNG", frames=1) -> bytes:
 
 
 def test_long_image_is_narrowed_and_cut_from_the_top():
-    out = images.slices(picture(2000, 7000))              # 1000 x 3500 → 1500 · 1500 · 500
+    out = images.slices(picture(2000, 7000))              # 1000 x 3500 -> 1500, 1500, 500
     sizes = [Image.open(io.BytesIO(b)).size for b in out]
     assert sizes == [(1000, 1500), (1000, 1500), (1000, 500)]
     assert all(Image.open(io.BytesIO(b)).format == "JPEG" for b in out)

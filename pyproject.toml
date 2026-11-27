@@ -4,13 +4,13 @@ version = "0.1.0"
 description = "indig 크롤러 — 수집 · 저장 · 전처리 · Studio 전송 (KT VM)"
 requires-python = ">=3.12"
 dependencies = [
-    "scrapling[fetchers,ai]==0.5.1",   # ai = MCP 서버 (웹 조사에서 페이지 열기 · webtools.PageReader)
-    "google-genai==3.5.0",             # Gemini (11/18 Anthropic 에서 바꿈)
+    "scrapling[fetchers,ai]==0.5.1",   # ai = MCP 서버 (웹 조사에서 페이지 열기, webtools.PageReader)
+    "google-genai==3.5.0",             # Gemini (Anthropic 에서 바꿈)
     "SQLAlchemy==2.1.9",
     "PyMySQL==1.2.4",
     "PyJWT==2.15.1",
     "APScheduler==3.11.3",
-    "Pillow==11.3.0",          # 공연 포스터 · 소개 이미지를 모델이 읽게 줄이고 자름 (11/18)
+    "Pillow==11.3.0",          # 공연 포스터, 소개 이미지를 모델이 읽게 줄이고 자름
     "holidays==0.108",         # KOPIS 시간 안내의 HOL 을 한국 공휴일로 읽음
     "tzdata==2026.6",          # 슬림 이미지에도 Asia/Seoul 이 있게
 ]

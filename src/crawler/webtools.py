@@ -1,12 +1,12 @@
-"""웹 조사 도구 두 개 (11/18 · Anthropic 웹 검색 · 웹 페치를 대신함) — 모델이 함수 호출로 부릅니다 (sources/websearch.py).
+"""웹 조사 도구 두 개 (, Anthropic 웹 검색, 웹 페치를 대신함) - 모델이 함수 호출로 부릅니다 (sources/websearch.py).
 
-- Tavily: 웹 검색 API. basic 검색 1번 = 1크레딧 (무료 월 1,000 · 분당 100건). 주소 · 제목 · 본문 조각 · 게시일을 돌려줍니다.
-- PageReader: Scrapling MCP 서버(stdio · 크롤러 프로세스의 자식으로만 · 포트를 열지 않음)의 make_request 하나만 씁니다.
-  MCP 를 그대로 모델에게 주지 않고 감쌉니다 (계획 10.6 에서 그대로 붙이지 않은 이유 ①~④):
-  ① 우회 끔 — impersonate 없음 · stealthy_headers False · 우리 User-Agent (브라우저 · Cloudflare 통과 도구는 안 씀)
-  ② robots.txt · 사이트 간격 — http.Http.allow (리다이렉트로 도착한 주소도 robots 확인)
-  ③ 안쪽 주소 막기 — 공인 IP 로만 풀리는 주소 · 리다이렉트는 safe(사설 IP 금지). 어떤 주소를 열지는 websearch 가 검색 결과로 한 번 더 제한
-  ④ JS 실행 · 브라우저 없음 (KT VM · PC 메모리)
+- Tavily: 웹 검색 API. basic 검색 1번 = 1크레딧 (무료 월 1,000, 분당 100건). 주소, 제목, 본문 조각, 게시일을 돌려줍니다.
+- PageReader: Scrapling MCP 서버(stdio, 크롤러 프로세스의 자식으로만, 포트를 열지 않음)의 make_request 하나만 씁니다.
+  MCP 를 그대로 모델에게 주지 않고 감쌉니다 (계획 10.6 에서 그대로 붙이지 않은 이유 1~4):
+  1 우회 끔 - impersonate 없음, stealthy_headers False, 우리 User-Agent (브라우저, Cloudflare 통과 도구는 안 씀)
+  2 robots.txt, 사이트 간격 - http.Http.allow (리다이렉트로 도착한 주소도 robots 확인)
+  3 안쪽 주소 막기 - 공인 IP 로만 풀리는 주소, 리다이렉트는 safe(사설 IP 금지). 어떤 주소를 열지는 websearch 가 검색 결과로 한 번 더 제한
+  4 JS 실행, 브라우저 없음 (KT VM, PC 메모리)
 """
 import asyncio
 import ipaddress
@@ -23,17 +23,17 @@ from urllib.parse import urlsplit
 from .http import Blocked
 
 TAVILY_URL = "https://api.tavily.com/search"
-# 검색 결과에서 뺄 사이트 — Spotify 만 (11/17 사용자 결정 · 쓰지 않음). 11/18 사용자 지시: 나머지는 다 찾음 (AI 수집 금지 사이트의 검색 조각도 씀)
+# 검색 결과에서 뺄 사이트 - Spotify 만 (사용자 결정, 쓰지 않음). 사용자 지시: 나머지는 다 찾음 (AI 수집 금지 사이트의 검색 조각도 씀)
 EXCLUDE_DOMAINS = ["spotify.com", "open.spotify.com"]
 
 
-RUN_BUDGET = 40   # 실행 한 번에 쓸 검색 크레딧 — 11/22 15 → 20 · 11/23 20 → 40 (하루 몫은 runner.search_budget 이 달 단위로 나눔)
+RUN_BUDGET = 40   # 실행 한 번에 쓸 검색 크레딧 - 15 -> 20, 20 -> 40 (하루 몫은 runner.search_budget 이 달 단위로 나눔)
 MONTHLY_SEARCHES = 1000   # Tavily 무료 월 크레딧 (매달 1일 다시 채워짐)
-SEARCH_RESERVE = 100      # 기록 밖 사용 몫 (손 시험 · 로컬 — 11/23 Tavily 161 · 우리 기록 143)
+SEARCH_RESERVE = 100      # 기록 밖 사용 몫 (손 시험, 로컬 - Tavily 161, 우리 기록 143)
 
 
 class SearchQuota(Exception):
-    """이번 실행의 검색 한도(RUN_BUDGET)를 다 씀 · Tavily 크레딧 소진(432 · 433) — 남은 검색은 다음 실행에"""
+    """이번 실행의 검색 한도(RUN_BUDGET)를 다 씀, Tavily 크레딧 소진(432, 433) - 남은 검색은 다음 실행에"""
 
 
 class Tavily:
@@ -82,12 +82,12 @@ class PageReader:
         self.http = http
         self.user_agent = user_agent
         self.fetches = 0
-        self._call = call or self._mcp_call         # (도구 이름, 인자) → {status, content: [글 조각], url}
+        self._call = call or self._mcp_call         # (도구 이름, 인자) -> {status, content: [글 조각], url}
         self._resolve = resolve
         self._loop = self._thread = self._session = self._closing = self._served = None
 
     def read(self, url: str) -> tuple[str, str]:
-        """(도착 주소, 본문 마크다운). robots · 안쪽 주소 · 오류면 Blocked / RuntimeError"""
+        """(도착 주소, 본문 마크다운). robots, 안쪽 주소, 오류면 Blocked / RuntimeError"""
         self._public(url)
         self.http.allow(url)
         res = self._call("make_request", {
@@ -104,7 +104,7 @@ class PageReader:
         return final, "\n\n".join(res.get("content") or [])
 
     def check_public(self, url: str):
-        """11/26 페이지 안에서 찾은 주소(상세 이미지)도 같은 검사 — 공개 주소가 아니면 Blocked"""
+        """페이지 안에서 찾은 주소(상세 이미지)도 같은 검사 - 공개 주소가 아니면 Blocked"""
         self._public(url)
 
     def _public(self, url: str):
@@ -116,9 +116,9 @@ class PageReader:
         except OSError:
             raise Blocked(url) from None
         if not addrs or any(not ipaddress.ip_address(a.split("%")[0]).is_global for a in addrs):
-            raise Blocked(url)                       # 사설 · 루프백 · 링크 로컬 (같은 망의 studio · mysql · 클러스터 주소)
+            raise Blocked(url)                       # 사설, 루프백, 링크 로컬 (같은 망의 studio, mysql, 클러스터 주소)
 
-    # ---------- Scrapling MCP (stdio) ----------
+    # Scrapling MCP (stdio)
 
     def _mcp_call(self, name: str, args: dict) -> dict:
         if self._loop is None:
@@ -132,7 +132,7 @@ class PageReader:
         return data
 
     def _start(self):
-        """MCP 세션은 한 작업 안에서 열고 닫아야 해서(anyio) 전용 스레드의 이벤트 루프에서 계속 열어 둡니다 — 실행이 끝나면 close()"""
+        """MCP 세션은 한 작업 안에서 열고 닫아야 해서(anyio) 전용 스레드의 이벤트 루프에서 계속 열어 둡니다 - 실행이 끝나면 close()"""
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, name="scrapling-mcp", daemon=True)
         self._thread.start()

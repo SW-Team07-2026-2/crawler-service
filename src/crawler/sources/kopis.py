@@ -1,6 +1,6 @@
-"""KOPIS 공연예술통합전산망 오픈 API — 대중음악(CCCD) 공연 목록 · 상세. 서비스 키는 kopis.or.kr 에서 발급 (출처 표시).
+"""KOPIS 공연예술통합전산망 오픈 API - 대중음악(CCCD) 공연 목록, 상세. 서비스 키는 kopis.or.kr 에서 발급 (출처 표시).
 
-필드 이름은 KOPIS 오픈 API 안내 기준이고, 키가 없어 11/17 에는 실제 응답으로 확인하지 못했습니다 — 키를 받은 뒤
+필드 이름은 KOPIS 오픈 API 안내 기준이고, 키가 없어 에는 실제 응답으로 확인하지 못했습니다 - 키를 받은 뒤
 `crawler run lunch --dry-run` 으로 첫 응답을 보고 맞춥니다. 상세는 통째로(dict) Gemini 에 넘기므로 이름이 조금 달라도 동작합니다.
 """
 import xml.etree.ElementTree as ET
@@ -28,7 +28,7 @@ def detail(http, key: str, mt20id: str) -> dict:
 
 
 def facility(http, key: str, mt10id: str) -> dict:
-    """공연시설 상세 — 주소(adres) · 전체 좌석(seatscale) · 공연장(mt13s: [{mt13id, prfplcnm, seatscale}]). 시설 정보는 잘 안 바뀌어 7일 캐시"""
+    """공연시설 상세 - 주소(adres), 전체 좌석(seatscale), 공연장(mt13s: [{mt13id, prfplcnm, seatscale}]). 시설 정보는 잘 안 바뀌어 7일 캐시"""
     if not mt10id:
         return {}
     rows = parse(http.get("kopis", f"{API}/prfplc/{mt10id}?service={key}", max_age=timedelta(days=7)))
@@ -36,7 +36,7 @@ def facility(http, key: str, mt10id: str) -> dict:
 
 
 def hall(fac: dict, mt13id: str | None) -> dict:
-    """그 공연이 열리는 공연장(관) — 이름 · 좌석. 못 찾으면 빈 dict"""
+    """그 공연이 열리는 공연장(관) - 이름, 좌석. 못 찾으면 빈 dict"""
     for h in fac.get("mt13s") or []:
         if isinstance(h, dict) and mt13id and h.get("mt13id") == mt13id:
             return h
@@ -44,7 +44,7 @@ def hall(fac: dict, mt13id: str | None) -> dict:
 
 
 def parse(xml_text: str) -> list[dict]:
-    """<dbs><db>…</db></dbs> → [{태그: 글자}] · 하위 목록(styurls · relates)은 리스트로. 오류 응답(returncode)은 예외."""
+    """<dbs><db>...</db></dbs> -> [{태그: 글자}], 하위 목록(styurls, relates)은 리스트로. 오류 응답(returncode)은 예외."""
     root = ET.fromstring(xml_text)
     out = []
     for db in root.findall("db"):
