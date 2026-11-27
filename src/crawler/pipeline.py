@@ -23,6 +23,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
+import holidays
 from sqlalchemy import delete, or_, select
 
 from . import db as dbm
@@ -57,6 +58,12 @@ CONCERT_VERSION = 3                    # 공연 정리 방식(프롬프트 · �
 CONCERT_REREAD = 60                    # 11/26 방식만 바뀐(원문은 같은) 공연을 한 번 실행에 다시 정리할 수 — 나머지는 다음 실행에 (Gemini 몫을 아티스트 판단에도 남기려고)
 KOPIS_HOSTS = {"www.kopis.or.kr", "kopis.or.kr"}   # Studio 가 승인할 때 옮겨 오는 곳 (app.image.import-hosts 와 같음)
 MAX_IMAGE_URLS = 20                    # Concert imageUrls 상한
+MAX_SESSIONS = 50                      # Concert 가 받는 회차 수 상한
+SESSION_NOTE = "검수 필요 - 회차"       # 회차를 만들며 남긴 관리자 확인 글의 앞부분
+KST = timezone(timedelta(hours=9))
+WEEKDAYS = {"월요일": 0, "화요일": 1, "수요일": 2, "목요일": 3, "금요일": 4, "토요일": 5, "일요일": 6}
+_DAY = "|".join(WEEKDAYS)
+_SEGMENT = re.compile(rf"\s*({_DAY}|HOL)(?:\s*~\s*({_DAY}))?\s*\(([^)]*)\)\s*")
 KOPIS_DOWN = 5                         # 공연 상세가 (다시 불러도) 이만큼 연달아 실패하면 KOPIS 가 내려간 것으로 보고 남은 공연은 다음 실행에
 MAX_CAST_LOOKUPS = 20                  # 팀을 못 찾은 출연진을 MusicBrainz 에서 볼 최대 수 (공연 한 건)
 RECENT = timedelta(days=180)           # 이보다 최근 앨범은 트랙 · 레이블을 7일마다 다시 봄 (그 전은 90일)
@@ -187,9 +194,13 @@ class Pipeline:
                     self.stats["concert_same_input"] += 1
                     if item.status != "SKIPPED":
                         payload = json.loads(item.payload_json)
-                        notes = fit_kopis_dates(detail, payload["concert"])   # 이 검사 전에 정리한 것도 Gemini 없이 고침
-                        if notes:
-                            payload["concert"]["reviewNotes"] = notes
+                        c0 = payload["concert"]
+                        had = c0.get("sessions")
+                        notes = fit_kopis_dates(detail, c0)   # 이 검사 전에 정리한 것도 Gemini 없이 고침
+                        session_notes = fit_sessions(detail, c0)
+                        if notes or c0.get("sessions") != had:
+                            kept = notes or [n for n in c0.get("reviewNotes") or [] if not n.startswith(SESSION_NOTE)]
+                            c0["reviewNotes"] = kept + session_notes
                             self._upsert(s, "CONCERT", mt20id, payload, input_hash, origin=item.origin)
                             s.commit()
                             self.stats["concert_dates_fixed"] += 1
@@ -1344,6 +1355,7 @@ def to_concert(detail: dict, c: dict, venue: dict | None = None) -> dict:
         "sourceUrl": link,
     }
     concert["reviewNotes"] = fit_kopis_dates(detail, concert)
+    concert["reviewNotes"] += fit_sessions(detail, concert)
     concert["description"] = _description(detail, c, venue, concert)
     return concert
 
@@ -1385,6 +1397,79 @@ def fit_kopis_dates(detail: dict, concert: dict) -> list[str]:
             note += f" · 끝 {ends:%Y-%m-%d %H:%M} → {new_end:%Y-%m-%d %H:%M}"
     period = " ~ ".join(dict.fromkeys(x for x in (detail.get("prfpdfrom"), detail.get("prfpdto")) if x))
     return [f"{note} (KOPIS 기간 {period} · 시간 안내 {detail.get('dtguidance') or '없음'} 에 맞춰 크롤러가 고침)"]
+
+
+def kopis_sessions(detail: dict) -> tuple[list[datetime], bool] | None:
+    """KOPIS 공연 기간과 시간 안내로 회차 시작 시각을 만듭니다.
+
+    시간 안내는 "목요일 ~ 금요일(20:00), 토요일(15:00,19:00), HOL(17:00)" 모양이고, 공휴일에는 HOL 시각을 씁니다.
+
+    :param detail: KOPIS 공연 상세 (prfpdfrom, prfpdto, dtguidance)
+    :return: (시작 순 회차 시각, 공휴일 시각을 쓴 회차가 있는지). 읽지 못하는 모양이면 None
+    """
+    try:
+        first = datetime.strptime(detail.get("prfpdfrom") or "", "%Y.%m.%d").date()
+        last = datetime.strptime(detail.get("prfpdto") or "", "%Y.%m.%d").date()
+    except ValueError:
+        return None
+    if not 0 <= (last - first).days <= 400:
+        return None
+    rules, hol = {}, None
+    for part in re.split(rf",\s*(?=(?:{_DAY}|HOL))", detail.get("dtguidance") or ""):
+        m = _SEGMENT.fullmatch(part)
+        if not m:
+            return None
+        start, end, text = m.groups()
+        times = [(int(h), int(mi)) for h, mi in re.findall(r"(\d{1,2}):(\d{2})", text)]
+        if not times or len(times) != len(text.split(",")) or any(h > 23 or mi > 59 for h, mi in times):
+            return None
+        if start == "HOL":
+            hol = times
+            continue
+        day = WEEKDAYS[start]
+        while True:
+            rules[day] = times
+            if day == WEEKDAYS[end or start]:
+                break
+            day = (day + 1) % 7
+    off = holidays.country_holidays("KR", years=range(first.year, last.year + 1)) if hol else {}
+    out, used_hol, day = [], False, first
+    while day <= last:
+        on_hol = bool(hol) and day in off
+        used_hol |= on_hol
+        out += [datetime(day.year, day.month, day.day, h, mi, tzinfo=KST) for h, mi in (hol if on_hol else rules.get(day.weekday(), []))]
+        day += timedelta(days=1)
+    return sorted(set(out)), used_hol
+
+
+def fit_sessions(detail: dict, concert: dict) -> list[str]:
+    """회차가 둘 이상이면 concert 에 sessions 를 넣고 시작을 첫 회차로 맞춥니다. 하나면 sessions 를 빼고 startsAt 하나로 둡니다.
+
+    :param detail: KOPIS 공연 상세
+    :param concert: Studio 로 보낼 공연 후보 (바꿉니다)
+    :return: 관리자가 확인할 글
+    """
+    concert.pop("sessions", None)
+    found = kopis_sessions(detail)
+    if not found or len(found[0]) < 2:
+        return []
+    starts, used_hol = found
+    guide = f"(KOPIS 기간 {detail.get('prfpdfrom')} ~ {detail.get('prfpdto')}, 시간 안내 {detail.get('dtguidance')})"
+    if len(starts) > MAX_SESSIONS:
+        return [f"{SESSION_NOTE} {len(starts)}개는 {MAX_SESSIONS}개를 넘어 넣지 않았습니다. 관리자가 회차를 넣습니다 {guide}"]
+    notes = []
+    concert["sessions"] = [{"startsAt": s.isoformat()} for s in starts]
+    first = starts[0].isoformat()
+    if concert.get("startsAt") != first:
+        before = concert.get("startsAt") or "없음"
+        concert["startsAt"] = first
+        notes.append(f"{SESSION_NOTE} 시작 {before} 를 첫 회차 {first} 로 맞춤 {guide}")
+    if concert.get("endsAt") and datetime.fromisoformat(concert["endsAt"]) <= starts[-1]:
+        notes.append(f"{SESSION_NOTE} 끝 {concert['endsAt']} 이 마지막 회차 시작보다 앞이라 비움 {guide}")
+        concert["endsAt"] = None
+    if used_hol:
+        notes.append(f"{SESSION_NOTE} 공휴일은 HOL 시각으로 넣었습니다. 회차 {len(starts)}개를 확인해 주세요 {guide}")
+    return notes
 
 
 def _opt(v):

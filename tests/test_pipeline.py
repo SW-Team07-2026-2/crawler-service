@@ -6,7 +6,7 @@ from sqlalchemy import select, update
 
 from crawler import db as dbm
 from crawler import runner
-from crawler.pipeline import Pipeline, fit_kopis_dates, to_concert
+from crawler.pipeline import Pipeline, fit_kopis_dates, fit_sessions, kopis_sessions, to_concert
 from crawler.webtools import SearchQuota
 
 from conftest import FakeLlm, FakeStudio, FakeWeb, make_http, settings
@@ -1233,6 +1233,78 @@ def test_concert_dates_outside_the_kopis_period_are_fixed_and_flagged_for_review
     fine = {"startsAt": "2026-12-12T18:00:00+09:00", "endsAt": None}
     assert fit_kopis_dates({"prfpdfrom": "2026.12.12", "prfpdto": "2026.12.13", "dtguidance": "토요일(18:00), 일요일(17:00)"}, fine) == []
     assert fit_kopis_dates({}, {"startsAt": None}) == []                           # 기준이 없으면 그대로
+
+
+def test_kopis_schedule_becomes_sessions():
+    """KOPIS 기간과 시간 안내로 회차를 만들고 공휴일은 HOL 시각을 씀"""
+    def starts(detail):
+        found = kopis_sessions(detail)
+        return None if found is None else ([s.isoformat() for s in found[0]], found[1])
+
+    weekend = {"prfpdfrom": "2026.12.12", "prfpdto": "2026.12.13", "dtguidance": "토요일(18:00), 일요일(17:00)"}
+    assert starts(weekend) == (["2026-12-12T18:00:00+09:00", "2026-12-13T17:00:00+09:00"], False)
+    two_shows = {"prfpdfrom": "2026.12.25", "prfpdto": "2026.12.25", "dtguidance": "금요일(16:00,19:30)"}
+    assert starts(two_shows) == (["2026-12-25T16:00:00+09:00", "2026-12-25T19:30:00+09:00"], False)
+    overnight = {"prfpdfrom": "2026.12.17", "prfpdto": "2026.12.18", "dtguidance": "목요일(22:00)"}
+    assert starts(overnight) == (["2026-12-17T22:00:00+09:00"], False)
+
+    run = {"prfpdfrom": "2026.12.11", "prfpdto": "2026.12.27", "dtguidance": "목요일 ~ 금요일(20:00), 토요일 ~ 일요일(17:00), HOL(17:00)"}
+    got, used_hol = starts(run)
+    assert used_hol and len(got) == 11
+    assert "2026-12-25T17:00:00+09:00" in got and "2026-12-25T20:00:00+09:00" not in got
+    assert not any(d.startswith(("2026-12-14", "2026-12-15", "2026-12-16")) for d in got)
+
+    assert starts({**weekend, "dtguidance": "주말 공연"}) is None
+    assert starts({**weekend, "dtguidance": "토요일(25:00)"}) is None
+    assert starts({"dtguidance": "토요일(18:00)"}) is None
+
+
+def test_two_or_more_sessions_go_to_the_candidate():
+    """회차가 둘 이상이면 sessions 를 넣고 시작은 첫 회차, 하나면 sessions 없이 startsAt 하나"""
+    weekend = {"prfpdfrom": "2026.12.12", "prfpdto": "2026.12.13", "dtguidance": "토요일(18:00), 일요일(17:00)"}
+    c = {"startsAt": "2026-12-12T18:00:00+09:00", "endsAt": "2026-12-13T19:00:00+09:00"}
+    assert fit_sessions(weekend, c) == []
+    assert c["sessions"] == [{"startsAt": "2026-12-12T18:00:00+09:00"}, {"startsAt": "2026-12-13T17:00:00+09:00"}]
+
+    late = {"startsAt": "2026-12-13T17:00:00+09:00", "endsAt": "2026-12-12T20:00:00+09:00"}
+    notes = fit_sessions(weekend, late)
+    assert late["startsAt"] == "2026-12-12T18:00:00+09:00" and late["endsAt"] is None
+    assert len(notes) == 2 and all(n.startswith("검수 필요 - 회차") for n in notes)
+
+    single = {"startsAt": "2026-12-19T17:00:00+09:00", "sessions": [{"startsAt": "x"}]}
+    assert fit_sessions({"prfpdfrom": "2026.12.19", "prfpdto": "2026.12.19", "dtguidance": "토요일(17:00)"}, single) == []
+    assert "sessions" not in single
+
+    daily = {"prfpdfrom": "2027.01.01", "prfpdto": "2027.03.31", "dtguidance": "월요일 ~ 일요일(20:00)"}
+    many = {"startsAt": "2027-01-01T20:00:00+09:00"}
+    assert "50개를 넘어" in fit_sessions(daily, many)[0] and "sessions" not in many
+
+    hol = {"prfpdfrom": "2026.12.24", "prfpdto": "2026.12.25", "dtguidance": "목요일(20:00), HOL(17:00)"}
+    c = {"startsAt": "2026-12-24T20:00:00+09:00"}
+    assert "HOL" in fit_sessions(hol, c)[0] and c["sessions"][1] == {"startsAt": "2026-12-25T17:00:00+09:00"}
+
+
+def test_sessions_are_added_to_candidates_already_sent_without_asking_gemini(sessions):
+    """원문이 그대로인 공연도 다음 실행에서 회차를 넣어 다시 보냄. 날짜를 고친 글은 남김"""
+    w = web()
+    p = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=FakeLlm(concerts={"PF100": INDIE, "PF200": MAINSTREAM}),
+                 studio=FakeStudio())
+    p.concerts()
+    assert len(json.loads(items(sessions, "CONCERT")["PF100"].payload_json)["concert"]["sessions"]) == 2
+    with sessions() as s:
+        item = s.scalar(select(dbm.Item).where(dbm.Item.key == "PF100"))
+        payload = json.loads(item.payload_json)
+        payload["concert"].pop("sessions")
+        payload["concert"]["reviewNotes"] = ["검수 필요 - 전에 고친 날짜"]
+        item.payload_json, item.status, item.source_hash = json.dumps(payload, ensure_ascii=False), "SENT", "old"
+        s.commit()
+
+    llm = FakeLlm(concerts={})
+    p2 = Pipeline(sessions, make_http(sessions, w), settings(kopis_key="KEY"), llm=llm, studio=FakeStudio())
+    p2.concerts()
+    c = json.loads(items(sessions, "CONCERT")["PF100"].payload_json)["concert"]
+    assert llm.calls == [] and len(c["sessions"]) == 2 and c["reviewNotes"] == ["검수 필요 - 전에 고친 날짜"]
+    assert items(sessions, "CONCERT")["PF100"].status == "READY"
 
 
 def test_concerts_sent_before_the_date_check_are_fixed_without_asking_gemini_again(sessions):
